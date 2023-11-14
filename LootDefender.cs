@@ -18,7 +18,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.0.8")]
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.0.9")]
     [Description("Defends loot from other players who dealt less damage than you.")]
     class LootDefender : RustPlugin
     {
@@ -1156,32 +1156,17 @@ namespace Oxide.Plugins
                 return;
             }
 
+            ss.OwnerID = player.userID;
+            ss.skinID = supplyDropSkinID;
+
             if (config.SupplyDrop.Bypass)
             {
-                var drop = GameManager.server.CreateEntity(StringPool.Get(3632568684), ss.transform.position) as SupplyDrop;
                 var userid = player.userID;
+                var position = ss.transform.position;
+                var resourcePath = ss.EntityToCreate.resourcePath;
 
-                drop.OwnerID = userid;
-                drop.skinID = supplyDropSkinID;
-                drop.Spawn();
-                drop.Invoke(() => drop.OwnerID = userid, 1f);
-
-                if (config.SupplyDrop.LockTime > 0)
-                {
-                    OnSupplyDropLanded(drop);
-                }
-
-                if (!ss.IsDestroyed)
-                {
-                    ss.Invoke(ss.FinishUp, 4.5f);
-                    ss.SetFlag(BaseEntity.Flags.On, true, false, true);
-                    ss.SendNetworkUpdateImmediate(false);
-                }
-            }
-            else
-            {
-                ss.OwnerID = player.userID;
-                ss.skinID = supplyDropSkinID;
+                ss.CancelInvoke(ss.Explode);
+                ss.Invoke(() => Explode(ss, userid, position, resourcePath), 3f);
             }
 
             if (config.SupplyDrop.NotifyChat)
@@ -1198,6 +1183,29 @@ namespace Oxide.Plugins
             }
 
             Interface.CallHook("OnModifiedSupplySignal", player, ss, tw);
+        }
+
+        private void Explode(SupplySignal ss, ulong userid, Vector3 position, string resourcePath)
+        {
+            if (!ss.IsDestroyed)
+            {
+                position = ss.transform.position; 
+                ss.Invoke(ss.FinishUp, 4.5f);
+                ss.SetFlag(BaseEntity.Flags.On, true, false, true);
+                ss.SendNetworkUpdateImmediate(false);
+            }
+
+            var drop = GameManager.server.CreateEntity(StringPool.Get(3632568684), position) as SupplyDrop;
+
+            drop.OwnerID = userid;
+            drop.skinID = supplyDropSkinID;
+            drop.Spawn();
+            drop.Invoke(() => drop.OwnerID = userid, 1f);
+
+            if (config.SupplyDrop.LockTime > 0)
+            {
+                OnSupplyDropLanded(drop);
+            }
         }
 
         private void OnCargoPlaneSignaled(CargoPlane plane, SupplySignal ss)
