@@ -18,7 +18,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.0.7")]
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.0.8")]
     [Description("Defends loot from other players who dealt less damage than you.")]
     class LootDefender : RustPlugin
     {
@@ -286,7 +286,7 @@ namespace Oxide.Plugins
                         {
                             foreach (var target in BasePlayer.activePlayerList)
                             {
-                                CreateMessage(target, "Locked Heli", attacker.displayName, grid);
+                                CreateMessage(target, "Locked Heli", grid, attacker.displayName);
                             }
                         }                        
 
@@ -301,7 +301,7 @@ namespace Oxide.Plugins
                         {
                             foreach (var target in BasePlayer.activePlayerList)
                             {
-                                CreateMessage(target, "Locked Bradley", attacker.displayName, grid);
+                                CreateMessage(target, "Locked Bradley", grid, attacker.displayName);
                             }
                         }
 
