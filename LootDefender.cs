@@ -1,30 +1,32 @@
-﻿//#define DEBUG
-
-using Facepunch;
+﻿using Facepunch;
 using Newtonsoft.Json;
 using Oxide.Core;
+using Oxide.Core.Libraries.Covalence;
 using Oxide.Core.Plugins;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using UnityEngine;
 
-namespace Oxide.Plugins {
-    [Info("Loot Defender", "Egor Blagov", "1.0.3")]
-    [Description("Defends loot from other players who not involved into action")]
-    class LootDefender : RustPlugin {
+namespace Oxide.Plugins
+{
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "1.0.4")]
+    [Description("Defends loot from other players who dealt less damage than you.")]
+    class LootDefender : RustPlugin
+    {
         [PluginReference]
-        Plugin PersonalHeli;
+        Plugin PersonalHeli, BlackVenom;
 
         private const float KillEntitySpawnRadius = 10.0f;
-        private string permUse = "lootdefender.use";
-        private string permAdm = "lootdefender.adm";
+        private const string permUse = "lootdefender.use";
+        private const string permAdm = "lootdefender.adm";
         private static LootDefender Instance;
-
-
+        
         #region Config
 
-        class PluginConfig {
+        class PluginConfig
+        {
             public int AttackTimeoutSeconds = 300;
             public float RelativeAdvantageMin = 0.05f;
             public bool UseTeams = true;
@@ -41,55 +43,80 @@ namespace Oxide.Plugins {
 
         private PluginConfig config;
 
-        protected override void LoadDefaultConfig() {
-            Config.WriteObject(new PluginConfig(), true);
+        protected override void LoadDefaultConfig()
+        {
+            config = new PluginConfig();
+            Config.WriteObject(config, true);
         }
 
         #endregion
 
         #region Stored data
 
-        class StoredData {
+        class StoredData
+        {
             public Dictionary<uint, DamageInfo> damageInfos = new Dictionary<uint, DamageInfo>();
             public Dictionary<uint, LockInfo> lockInfos = new Dictionary<uint, LockInfo>();
 
-            public void Santize() {
+            public void Sanitize()
+            {
                 HashSet<uint> allNetIds = new HashSet<uint>();
-                foreach (var ent in BaseNetworkable.serverEntities) {
-                    if (ent?.net?.ID != null) {
+                foreach (var ent in BaseNetworkable.serverEntities)
+                {
+                    if (ent?.net != null)
+                    {
                         allNetIds.Add(ent.net.ID);
                     }
                 }
 
-                foreach (var id in damageInfos.Keys.ToList()) {
-                    if (!allNetIds.Contains(id)) {
+                var damageList = new List<uint>(damageInfos.Keys);
+
+                foreach (var id in damageList)
+                {
+                    if (!allNetIds.Contains(id))
+                    {
                         damageInfos.Remove(id);
                     }
                 }
 
-                foreach (var id in lockInfos.Keys.ToList()) {
-                    if (!allNetIds.Contains(id)) {
+                damageList.Clear();
+
+                var lockList = new List<uint>(lockInfos.Keys);
+
+                foreach (var id in lockList)
+                {
+                    if (!allNetIds.Contains(id))
+                    {
                         lockInfos.Remove(id);
                     }
                 }
+
+                lockList.Clear();
+                allNetIds.Clear();
             }
         }
 
-        private StoredData storedData;
+        private StoredData storedData = new StoredData();
 
-        private Dictionary<uint, LockInfo> lockInfos => this.storedData.lockInfos;
+        private Dictionary<uint, LockInfo> lockInfos => storedData.lockInfos;
 
-        private Dictionary<uint, DamageInfo> damageInfos => this.storedData.damageInfos;
+        private Dictionary<uint, DamageInfo> damageInfos => storedData.damageInfos;
 
-        private void SaveData() {
-            if (storedData != null) {
-                Interface.Oxide.DataFileSystem.WriteObject(Name, storedData, true);
-            }
+        private void SaveData()
+        {
+            Interface.Oxide.DataFileSystem.WriteObject(Name, storedData, true);
         }
 
-        private void LoadData() {
-            storedData = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name);
-            if (storedData == null) {
+        private void LoadData()
+        {
+            try
+            {
+                storedData = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name);
+            }
+            catch { }
+
+            if (storedData == null)
+            {
                 storedData = new StoredData();
                 SaveData();
             }
@@ -99,8 +126,10 @@ namespace Oxide.Plugins {
 
         #region L10N
 
-        protected override void LoadDefaultMessages() {
-            lang.RegisterMessages(new Dictionary<string, string> {
+        protected override void LoadDefaultMessages()
+        {
+            lang.RegisterMessages(new Dictionary<string, string>
+            {
                 ["NoPermission"] = "You have no permission to use this command",
                 ["DamageReport"] = "Damage report for {0}",
                 ["CannotLoot"] = "You cannot loot it, major damage was not from you",
@@ -109,7 +138,8 @@ namespace Oxide.Plugins {
                 ["Bradley"] = "Bradley APC"
             }, this, "en");
 
-            lang.RegisterMessages(new Dictionary<string, string> {
+            lang.RegisterMessages(new Dictionary<string, string>
+            {
                 ["NoPermission"] = "У Вас нет привилегии на использование этой команды",
                 ["DamageReport"] = "Нанесенный урон по {0}",
                 ["CannotLoot"] = "Это не Ваш лут, основная часть урона нанесена другими игроками",
@@ -119,126 +149,176 @@ namespace Oxide.Plugins {
             }, this, "ru");
         }
 
-        private static string _(string key, string userId, params object[] args) {
-            return string.Format(Instance.lang.GetMessage(key, Instance, userId), args);
+        private static string _(string key, string userId, params object[] args)
+        {
+            string message = Instance.lang.GetMessage(key, Instance, userId);
+            return args.Length > 0 ? string.Format(message, args) : message;
         }
 
         #endregion
 
         #region Damage and Locks calculation
 
-        class DamageEntry {
-            public float DamageDealt = 0.0f;
+        class DamageEntry
+        {
+            public float DamageDealt;
             public DateTime Timestamp;
 
             [JsonIgnore]
             public bool IsOutdated => DateTime.Now.Subtract(Timestamp).TotalSeconds > Instance.config.AttackTimeoutSeconds;
-            public void AddDamage(float amount) {
+            public void AddDamage(float amount)
+            {
                 DamageDealt += amount;
                 Timestamp = DateTime.Now;
             }
         }
 
-        class DamageInfo {
+        class DamageInfo
+        {
+            private readonly StringBuilder sb = new StringBuilder();
             public Dictionary<ulong, DamageEntry> damageEntries = new Dictionary<ulong, DamageEntry>();
             public string NameKey;
             [JsonIgnore]
             public float FullDamage => damageEntries.Values.Select(x => x.DamageDealt).Sum();
-            public DamageInfo() : this("unknown") {
+            public DamageInfo() : this("unknown")
+            {
 
             }
-            public DamageInfo(string namekey) {
-                this.NameKey = namekey;
+            public DamageInfo(string nameKey)
+            {
+                NameKey = nameKey;
             }
 
-            public void Damage(HitInfo info) {
-                if (info.InitiatorPlayer == null || info.InitiatorPlayer.IsNpc) {
-                    return;
+            public void AddDamage(HitInfo info)
+            {
+                DamageEntry entry;
+                if (!damageEntries.TryGetValue(info.InitiatorPlayer.userID, out entry))
+                {
+                    damageEntries[info.InitiatorPlayer.userID] = entry = new DamageEntry();
                 }
-                if (!damageEntries.ContainsKey(info.InitiatorPlayer.userID)) {
-                    damageEntries[info.InitiatorPlayer.userID] = new DamageEntry();
-                }
-                damageEntries[info.InitiatorPlayer.userID].AddDamage(info.damageTypes.Total());
+
+                entry.AddDamage(info.damageTypes.Total());
             }
 
-            public void OnKilled() {
-                foreach (var key in damageEntries.Keys.ToList()) {
-                    if (damageEntries[key].IsOutdated) {
+            public void OnKilled()
+            {
+                var damageList = new List<ulong>(damageEntries.Keys);
+
+                foreach (var key in damageList)
+                {
+                    if (damageEntries[key].IsOutdated)
+                    {
                         damageEntries.Remove(key);
                     }
                 }
+
                 DisplayDamageReport();
+                damageList.Clear();
             }
 
-            public void DisplayDamageReport() {
-                foreach (var damager in this.damageEntries.Keys) {
-                    BasePlayer player = RelationshipManager.FindByID(damager);
-                    Instance.SendReply(player, this.GetDamageReport(player.UserIDString));
+            public void DisplayDamageReport()
+            {
+                foreach (var damager in damageEntries.Keys)
+                {
+                    var player = RelationshipManager.FindByID(damager);
+
+                    if (!player.IsValid())
+                    {
+                        continue;
+                    }
+
+                    Instance.SendReply(player, GetDamageReport(player.UserIDString));
                 }
             }
 
-            public string GetDamageReport(string userIDString) {
+            public string GetDamageReport(string playerId)
+            {
                 var damageGroups = GetDamageGroups();
                 var topDamageGroups = GetTopDamageGroups(damageGroups);
-                string result = $"{_("DamageReport", userIDString, $"<color={Instance.config.HexColorOk}>{_(NameKey, userIDString)}</color>")}:\n";
-                foreach (var dg in damageGroups) {
-                    if (topDamageGroups.Contains(dg)) {
-                        result += $"<color={Instance.config.HexColorOk}>√</color> ";
-                    } else {
-                        result += $"<color={Instance.config.HexColorNotOk}>✖</color> ";
+
+                sb.Length = 0;
+                sb.AppendLine($"{_("DamageReport", playerId, $"<color={Instance.config.HexColorOk}>{_(NameKey, playerId)}</color>")}:");
+
+                foreach (var dg in damageGroups)
+                {
+                    if (topDamageGroups.Contains(dg))
+                    {
+                        sb.Append($"<color={Instance.config.HexColorOk}>√</color> ");
                     }
-                    result += dg.ToReport(this) + "\n";
+                    else
+                    {
+                        sb.Append($"<color={Instance.config.HexColorNotOk}>✖</color> ");
+                    }
+
+                    sb.Append($"{dg.ToReport(this)}\n");
                 }
+
+                string result = sb.ToString();
+                sb.Length = 0;
 
                 return result;
             }
 
-            public bool CanInteract(ulong playerId) {
-                var ableToInteract = getAbleToLoot();
-                if (ableToInteract == null || ableToInteract.Count == 0) {
+            public bool CanInteract(ulong playerId)
+            {
+                var topDamageGroups = GetTopDamageGroups(GetDamageGroups());
+                var ableToInteract = topDamageGroups.SelectMany(x => x.Players).ToList();
+
+                if (ableToInteract == null || ableToInteract.Count == 0)
+                {
                     return true;
                 }
 
                 return ableToInteract.Contains(playerId);
             }
 
-            private List<ulong> getAbleToLoot() {
-                var topDamageGroups = GetTopDamageGroups(GetDamageGroups());
-                return topDamageGroups.SelectMany(x => x.Players).ToList();
-            }
+            private List<DamageGroup> GetTopDamageGroups(List<DamageGroup> damageGroups)
+            {
+                var topDamageGroups = new List<DamageGroup>();
 
-            private List<DamageGroup> GetTopDamageGroups(List<DamageGroup> damageGroups) {
-                if (damageGroups.Count == 0) {
-                    return new List<DamageGroup>();
+                if (damageGroups.Count == 0)
+                {
+                    return topDamageGroups;
                 }
 
-                DamageGroup topDamageGroup = damageGroups.OrderByDescending(x => x.TotalDamage).First();
-                var topDamageGroups = new List<DamageGroup>();
-                foreach (var dg in damageGroups) {
-                    if ((topDamageGroup.TotalDamage - dg.TotalDamage) <= Instance.config.RelativeAdvantageMin * this.FullDamage) {
+                var topDamageGroup = damageGroups.OrderByDescending(x => x.TotalDamage).First();
+
+                foreach (var dg in damageGroups)
+                {
+                    if ((topDamageGroup.TotalDamage - dg.TotalDamage) <= Instance.config.RelativeAdvantageMin * FullDamage)
+                    {
                         topDamageGroups.Add(dg);
                     }
                 }
+
                 return topDamageGroups;
             }
 
-            private List<DamageGroup> GetDamageGroups() {
+            private List<DamageGroup> GetDamageGroups()
+            {
                 var result = new List<DamageGroup>();
 
-                foreach (var damage in this.damageEntries) {
+                foreach (var damage in damageEntries)
+                {
                     bool merged = false;
-                    foreach (var dT in result) {
-                        if (dT.TryMergeDamage(damage.Key, damage.Value.DamageDealt)) {
+
+                    foreach (var dT in result)
+                    {
+                        if (dT.TryMergeDamage(damage.Key, damage.Value.DamageDealt))
+                        {
                             merged = true;
                             break;
                         }
                     }
 
-                    if (!merged) {
-                        if (RelationshipManager.FindByID(damage.Key) == null) {
+                    if (!merged)
+                    {
+                        if (RelationshipManager.FindByID(damage.Key) == null)
+                        {
                             Instance.PrintError($"Invalid id, unable to find: {damage.Key}");
                             continue;
                         }
+
                         result.Add(new DamageGroup(damage.Key, damage.Value.DamageDealt));
                     }
                 }
@@ -247,75 +327,106 @@ namespace Oxide.Plugins {
             }
         }
 
-        class LockInfo {
+        class LockInfo
+        {
             public DamageInfo damageInfo;
             public DateTime LockTimestamp;
             public int LockTimeout;
 
             [JsonIgnore]
-            public bool IsLockOutdated => DateTime.Now.Subtract(LockTimestamp).TotalSeconds >= this.LockTimeout;
+            public bool IsLockOutdated => DateTime.Now.Subtract(LockTimestamp).TotalSeconds >= LockTimeout;
 
-            public LockInfo(DamageInfo damageInfo, int lockTimeout) {
+            public LockInfo(DamageInfo damageInfo, int lockTimeout)
+            {
                 LockTimestamp = DateTime.Now;
-                this.LockTimeout = lockTimeout;
+                LockTimeout = lockTimeout;
                 this.damageInfo = damageInfo;
             }
 
-            public bool CanInteract(ulong playerId) => this.damageInfo.CanInteract(playerId);
-            public string GetDamageReport(string userIdString) => this.damageInfo.GetDamageReport(userIdString);
+            public bool CanInteract(ulong playerId) => damageInfo.CanInteract(playerId);
+            public string GetDamageReport(string userIdString) => damageInfo.GetDamageReport(userIdString);
         }
 
-        class DamageGroup {
+        class DamageGroup
+        {
             public float TotalDamage { get; private set; }
-            public List<ulong> Players => new List<ulong> { FirstDamagerDealer }.Concat(this.additionalPlayers).ToList();
+            public List<ulong> Players => new List<ulong> { FirstDamagerDealer }.Concat(additionalPlayers).ToList();
             public bool IsSingle => additionalPlayers.Count == 0;
-            private ulong FirstDamagerDealer;
-            private List<ulong> additionalPlayers = new List<ulong>();
-            public DamageGroup(ulong playerId, float damage) {
-                this.TotalDamage = damage;
-                this.FirstDamagerDealer = playerId;
-                if (Instance.config.UseTeams) {
-                    var firstDDPlayer = RelationshipManager.FindByID(this.FirstDamagerDealer);
-                    if (firstDDPlayer.currentTeam != 0) {
-                        foreach (var member in RelationshipManager.Instance.teams[firstDDPlayer.currentTeam].members) {
-                            if (member != this.FirstDamagerDealer) {
-                                additionalPlayers.Add(member);
-                            }
-                        }
+            private ulong FirstDamagerDealer { get; set; }
+            private List<ulong> additionalPlayers { get; } = new List<ulong>();
+            
+            public DamageGroup(ulong playerId, float damage)
+            {
+                TotalDamage = damage;
+                FirstDamagerDealer = playerId;
+
+                if (!Instance.config.UseTeams)
+                {
+                    return;
+                }
+
+                var target = RelationshipManager.FindByID(playerId);
+                
+                if (!target.IsValid())
+                {
+                    return;
+                }
+
+                RelationshipManager.PlayerTeam team;
+                if (!RelationshipManager.Instance.playerToTeam.TryGetValue(playerId, out team))
+                {
+                    return;
+                }
+
+                for (int i = 0; i < team.members.Count; i++)
+                {
+                    ulong member = team.members[i];
+                    
+                    if (member == playerId)
+                    {
+                        continue;
                     }
+
+                    additionalPlayers.Add(member);
                 }
             }
 
-            public bool TryMergeDamage(ulong playerId, float damageAmount) {
-                if (IsPlayerInvolved(playerId)) {
-                    this.TotalDamage += damageAmount;
+            public bool TryMergeDamage(ulong playerId, float damageAmount)
+            {
+                if (IsPlayerInvolved(playerId))
+                {
+                    TotalDamage += damageAmount;
                     return true;
                 }
 
                 return false;
             }
 
-            public bool IsPlayerInvolved(ulong playerId) => playerId == this.FirstDamagerDealer || this.additionalPlayers.Contains(playerId);
+            public bool IsPlayerInvolved(ulong playerId) => playerId == FirstDamagerDealer || additionalPlayers.Contains(playerId);
 
-            public string ToReport(DamageInfo damageInfo) {
-                if (IsSingle) {
-                    return this.getLineForPlayer(this.FirstDamagerDealer, Instance.config.HexColorSinglePlayer, damageInfo);
+            public string ToReport(DamageInfo damageInfo)
+            {
+                if (IsSingle)
+                {
+                    return getLineForPlayer(FirstDamagerDealer, Instance.config.HexColorSinglePlayer, damageInfo);
                 }
 
                 return string.Format("({1}) {0:0}%",
-                    this.TotalDamage / damageInfo.FullDamage * 100,
-                    string.Join(" ", this.Players.Select(x => this.getLineForPlayer(x, Instance.config.HexColorTeam, damageInfo)))
-                 );
-
+                    TotalDamage / damageInfo.FullDamage * 100,
+                    string.Join(" ", Players.Select(x => getLineForPlayer(x, Instance.config.HexColorTeam, damageInfo)))
+                );
             }
 
-            private string getLineForPlayer(ulong playerId, string color, DamageInfo damageInfo) {
+            private string getLineForPlayer(ulong playerId, string color, DamageInfo damageInfo)
+            {
+                var displayName = RelationshipManager.FindByID(playerId)?.displayName ?? Instance.covalence.Players.FindPlayerById(playerId.ToString())?.Name ?? playerId.ToString();
                 float damage = 0.0f;
-                if (damageInfo.damageEntries.ContainsKey(playerId)) {
+                if (damageInfo.damageEntries.ContainsKey(playerId))
+                {
                     damage = damageInfo.damageEntries[playerId].DamageDealt;
                 }
                 string damageLine = string.Format("{0:0}%", damage / damageInfo.FullDamage * 100);
-                return $"<color={color}>{RelationshipManager.FindByID(playerId).displayName}</color> {damageLine}";
+                return $"<color={color}>{displayName}</color> {damageLine}";
             }
         }
 
@@ -323,151 +434,207 @@ namespace Oxide.Plugins {
 
         #region uMod hooks
 
-        private void OnServerSave() {
+        private void OnServerSave()
+        {
             SaveData();
         }
 
-        private void Init() {
+        private void Init()
+        {
             Instance = this;
-
+            AddCovalenceCommand("testlootdef", nameof(CommandTest), permAdm);
             permission.RegisterPermission(permUse, this);
-            permission.RegisterPermission(permAdm, this);
 
-            config = Config.ReadObject<PluginConfig>();
+            try
+            {
+                config = Config.ReadObject<PluginConfig>();
+            }
+            catch { }
+
+            if (config == null)
+            {
+                config = new PluginConfig();
+            }
+
             Config.WriteObject(config, true);
             LoadData();
 
-            storedData.Santize();
+            storedData.Sanitize();
         }
 
-        private void Unload() {
+        private void Unload()
+        {
             SaveData();
             Instance = null;
         }
 
-        private void OnEntityTakeDamage (BaseEntity entity, HitInfo hitInfo) {
-            if (entity?.net?.ID == null) {
+        private void OnEntityTakeDamage(BaseEntity entity, HitInfo hitInfo)
+        {
+            if (!entity.IsValid())
+            {
                 return;
             }
 
-            if (hitInfo.InitiatorPlayer == null || hitInfo.InitiatorPlayer.IsNpc) {
-                return;
-            }
+            var attacker = hitInfo.InitiatorPlayer;
 
-            if (!permission.UserHasPermission(hitInfo.InitiatorPlayer.UserIDString, permUse)) {
+            if (!attacker.IsValid() || attacker.IsNpc || !permission.UserHasPermission(attacker.UserIDString, permUse))
+            {
                 return;
             }
 
             string nameKey = null;
-            if (entity is BaseHelicopter)  {
-                if (PersonalHeli != null && PersonalHeli.Call<bool>("IsPersonal", entity as BaseHelicopter)) {
+            if (entity is BaseHelicopter)
+            {
+                if (PersonalHeli != null && PersonalHeli.Call<bool>("IsPersonal", entity as BaseHelicopter))
+                {
                     return;
+                }
+
+                if (BlackVenom != null && BlackVenom.IsLoaded && entity.OwnerID.IsSteamId())
+                {
+                    var success = BlackVenom.Call("IsBlackVenom", entity as BaseHelicopter, attacker);
+
+                    if (success is bool && !(bool)success)
+                    {
+                        return;
+                    }
                 }
 
                 nameKey = "Heli";
             }
 
-            if (entity is BradleyAPC) {
+            if (entity is BradleyAPC)
+            {
                 nameKey = "Bradley";
             }
 
-            if (entity is BasePlayer && (entity as BasePlayer).IsNpc) {
+            if (entity is BasePlayer && entity.IsNpc) // why npcs? :p
+            {
                 nameKey = (entity as BasePlayer).displayName;
             }
-             if (nameKey != null) {
-                if (!damageInfos.ContainsKey(entity.net.ID)) {
-                    damageInfos[entity.net.ID] = new DamageInfo(nameKey);
-                }
 
-                damageInfos[entity.net.ID].Damage(hitInfo);
+            if (string.IsNullOrEmpty(nameKey))
+            {
+                return;
             }
+
+            DamageInfo damageInfo;
+            if (!damageInfos.TryGetValue(entity.net.ID, out damageInfo))
+            {
+                damageInfos[entity.net.ID] = damageInfo = new DamageInfo(nameKey);
+            }
+
+            damageInfo.AddDamage(hitInfo);
         }
 
-        private object OnPlayerAttack(BasePlayer attacker, HitInfo info) {
-            if (!permission.UserHasPermission(attacker.UserIDString, permUse)) {
+        private object OnPlayerAttack(BasePlayer attacker, HitInfo info)
+        {
+            if (!permission.UserHasPermission(attacker.UserIDString, permUse))
+            {
                 return null;
             }
 
-            if (info.HitEntity is ServerGib && info.WeaponPrefab is BaseMelee) {
-                if (lockInfos.ContainsKey(info.HitEntity.net.ID)) {
-                    if (lockInfos[info.HitEntity.net.ID].IsLockOutdated) {
+            if (info.HitEntity is ServerGib && info.WeaponPrefab is BaseMelee)
+            {
+                LockInfo lockInfo;
+                if (lockInfos.TryGetValue(info.HitEntity.net.ID, out lockInfo))
+                {
+                    if (lockInfo.IsLockOutdated)
+                    {
                         lockInfos.Remove(info.HitEntity.net.ID);
                         return null;
                     }
 
-                    if (!lockInfos[info.HitEntity.net.ID].CanInteract(attacker.userID)) {
+                    if (!lockInfo.CanInteract(attacker.userID))
+                    {
                         SendReply(attacker, _("CannotMine", attacker.UserIDString));
-                        SendReply(attacker, lockInfos[info.HitEntity.net.ID].GetDamageReport(attacker.UserIDString));
+                        SendReply(attacker, lockInfo.GetDamageReport(attacker.UserIDString));
                         return false;
                     }
                 }
             }
+
             return null;
         }
 
-        private void OnEntityKill(BaseEntity entity) {
-            if (entity?.net?.ID == null || (!damageInfos.ContainsKey(entity.net.ID) && !lockInfos.ContainsKey(entity.net.ID))) {
+        private void OnEntityKill(BaseEntity entity)
+        {
+            if (!entity.IsValid() || (!damageInfos.ContainsKey(entity.net.ID) && !lockInfos.ContainsKey(entity.net.ID)))
+            {
                 return;
             }
 
-            if (entity is BaseHelicopter || entity is BradleyAPC) {
+            if (entity is BaseHelicopter || entity is BradleyAPC)
+            {
                 damageInfos[entity.net.ID].OnKilled();
                 var lockInfo = new LockInfo(damageInfos[entity.net.ID], entity is BaseHelicopter ? Instance.config.LockHeliSeconds : Instance.config.LockBradleySeconds);
                 LockInRadius<LootContainer>(entity.transform.position, lockInfo, KillEntitySpawnRadius);
                 LockInRadius<HelicopterDebris>(entity.transform.position, lockInfo, KillEntitySpawnRadius);
             }
 
-            if (entity is BasePlayer) {
-                BasePlayer npc = entity as BasePlayer;
-                List<NPCPlayerCorpse> corpses = Pool.GetList<NPCPlayerCorpse>();
+            if (entity is BasePlayer)
+            {
+                var npc = entity as BasePlayer;
+                var corpses = Pool.GetList<NPCPlayerCorpse>();
                 Vis.Entities(npc.transform.position, 3.0f, corpses);
-                if (corpses.Where(x => x.parentEnt == npc).Count() != 0) {
+                var corpse = corpses.FirstOrDefault(x => x.parentEnt == npc);
+                if (corpse.IsValid())
+                {
                     damageInfos[entity.net.ID].OnKilled();
-                    lockInfos[corpses.First(x => x.parentEnt == npc).net.ID] = new LockInfo(damageInfos[entity.net.ID], Instance.config.LockNPCSeconds);
+                    lockInfos[corpse.net.ID] = new LockInfo(damageInfos[entity.net.ID], Instance.config.LockNPCSeconds);
                 }
                 Pool.FreeList(ref corpses);
             }
 
-            if (entity is NPCPlayerCorpse) {
-                NPCPlayerCorpse corpse = entity as NPCPlayerCorpse;
+            if (entity is NPCPlayerCorpse)
+            {
+                var corpse = entity as NPCPlayerCorpse;
                 var corpsePos = corpse.transform.position;
                 var corpseId = corpse.playerSteamID;
                 var lockInfo = lockInfos[corpse.net.ID];
-                NextTick(() => {
-                    List<DroppedItemContainer> containers = Pool.GetList<DroppedItemContainer>();
+                NextTick(() => 
+                {
+                    var containers = Pool.GetList<DroppedItemContainer>();
                     Vis.Entities(corpsePos, 1.0f, containers);
-                    if (containers.Where(x => x.playerSteamID == corpseId).Count() != 0) {
-                        lockInfos[containers.First(x => x.playerSteamID == corpseId).net.ID] = lockInfo;
+                    var container = containers.FirstOrDefault(x => x.playerSteamID == corpseId);
+                    if (container.IsValid())
+                    {
+                        lockInfos[container.net.ID] = lockInfo;
                     }
                     Pool.FreeList(ref containers);
                 });
             }
 
-            if (lockInfos.ContainsKey(entity.net.ID)) {
+            if (lockInfos.ContainsKey(entity.net.ID))
+            {
                 lockInfos.Remove(entity.net.ID);
-            } else {
-                damageInfos.Remove(entity.net.ID);
             }
+            else damageInfos.Remove(entity.net.ID);
         }
 
-        private object CanLootEntity(BasePlayer player, BaseEntity entity) {
-            if (entity?.net?.ID == null || !lockInfos.ContainsKey(entity.net.ID)) {
+        private object CanLootEntity(BasePlayer player, BaseEntity entity)
+        {
+            if (!permission.UserHasPermission(player.UserIDString, permUse) || !entity.IsValid())
+            {
                 return null;
             }
 
-            if(!permission.UserHasPermission(player.UserIDString, permUse)) {
+            LockInfo lockInfo;
+            if (!lockInfos.TryGetValue(entity.net.ID, out lockInfo))
+            {
                 return null;
             }
 
-            if (lockInfos[entity.net.ID].IsLockOutdated) {
+            if (lockInfo.IsLockOutdated)
+            {
                 lockInfos.Remove(entity.net.ID);
                 return null;
             }
 
-            var canLoot = lockInfos[entity.net.ID].CanInteract(player.userID);
-            if (!canLoot) {
+            if (!lockInfo.CanInteract(player.userID))
+            {
                 SendReply(player, _("CannotLoot", player.UserIDString));
-                SendReply(player, lockInfos[entity.net.ID].GetDamageReport(player.UserIDString));
+                SendReply(player, lockInfo.GetDamageReport(player.UserIDString));
                 return false;
             }
 
@@ -476,32 +643,31 @@ namespace Oxide.Plugins {
 
         #endregion
 
-        private void LockInRadius<T>(Vector3 position, LockInfo lockInfo, float radius) where T : BaseEntity {
+        private void LockInRadius<T>(Vector3 position, LockInfo lockInfo, float radius) where T : BaseEntity
+        {
             var entities = Facepunch.Pool.GetList<T>();
             Vis.Entities(position, radius, entities);
-            foreach (var ent in entities) {
+            foreach (var ent in entities)
+            {
                 lockInfos[ent.net.ID] = lockInfo;
-                if (config.RemoveFireFromCrates) {
-                    (ent as LockedByEntCrate)?.lockingEnt?.ToBaseEntity()?.Kill();
+
+                if (config.RemoveFireFromCrates)
+                {
+                    var e = (ent as LockedByEntCrate)?.lockingEnt?.ToBaseEntity();
+
+                    if (e.IsValid() && !e.IsDestroyed)
+                    {
+                        e.Kill();
+                    }
                 }
             }
-            Facepunch.Pool.FreeList(ref entities);
+            Pool.FreeList(ref entities);
         }
 
-        [ConsoleCommand("testlootdef")]
-        private void testlootdef(ConsoleSystem.Arg arg) {
-            if (arg.Player() == null || permission.UserHasPermission(arg.Player().UserIDString, permAdm)) {
-                Puts($"total damage infos: {damageInfos.Count}");
-                Puts($"total lock infos: {lockInfos.Count}");
-            }
-        }
-
-        [ChatCommand("testlootdef")]
-        private void testcmd(BasePlayer player) {
-            if (permission.UserHasPermission(player.UserIDString, permAdm)) {
-                SendReply(player, $"total damage infos: {damageInfos.Count}");
-                SendReply(player, $"total lock infos: {lockInfos.Count}");
-            }
+        private void CommandTest(IPlayer p, string command, string[] args)
+        {
+            p.Reply($"total damage infos: {damageInfos.Count}");
+            p.Reply($"total lock infos: {lockInfos.Count}");
         }
     }
 }
