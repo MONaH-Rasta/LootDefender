@@ -9,7 +9,7 @@ using System.Linq;
 using UnityEngine;
 
 namespace Oxide.Plugins {
-    [Info("Loot Defender", "Egor Blagov", "1.0.1")]
+    [Info("Loot Defender", "Egor Blagov", "1.0.2")]
     [Description("Defends loot from other players who not involved into action")]
     class LootDefender : RustPlugin {
         [PluginReference]
@@ -279,7 +279,7 @@ namespace Oxide.Plugins {
                 if (Instance.config.UseTeams) {
                     var firstDDPlayer = RelationshipManager.FindByID(this.FirstDamagerDealer);
                     if (firstDDPlayer.currentTeam != 0) {
-                        foreach (var member in RelationshipManager.Instance.playerTeams[firstDDPlayer.currentTeam].members) {
+                        foreach (var member in RelationshipManager.Instance.teams[firstDDPlayer.currentTeam].members) {
                             if (member != this.FirstDamagerDealer) {
                                 additionalPlayers.Add(member);
                             }
@@ -329,7 +329,7 @@ namespace Oxide.Plugins {
             SaveData();
         }
 
-    
+
         private void Init() {
             Instance = this;
 
@@ -373,7 +373,7 @@ namespace Oxide.Plugins {
             if (entity is BasePlayer && (entity as BasePlayer).IsNpc) {
                 nameKey = (entity as BasePlayer).displayName;
             }
-             if (nameKey != null) { 
+             if (nameKey != null) {
                 if (!damageInfos.ContainsKey(entity.net.ID)) {
                     damageInfos[entity.net.ID] = new DamageInfo(nameKey);
                 }
@@ -475,7 +475,7 @@ namespace Oxide.Plugins {
         }
 
         #endregion
-        
+
         private void LockInRadius<T>(Vector3 position, LockInfo lockInfo, float radius) where T : BaseEntity {
             var entities = Facepunch.Pool.GetList<T>();
             Vis.Entities(position, radius, entities);
