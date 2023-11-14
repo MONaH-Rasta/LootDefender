@@ -15,20 +15,9 @@ using System.Text;
 using System.Text.RegularExpressions;
 using UnityEngine;
 
-/*
-Fixed all known issues
-Redesigned functionality to lock based on threshold damage instead of top damage dealers
-Removed lootdefender.use permission and functionality
-Added lootdefender.bypass.loot - users with this permission can loot anything
-Added lootdefender.bypass.damage - users with this permission can damage anything
-Added lootdefender.bypass.lockouts - users with this permission will not receive a bradley lockout
-Added Bradley lockout functionality, UI and DiscordMessages support
-Added hackable crate support
-*/
-
 namespace Oxide.Plugins
 {
-    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.0.0")]
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.0.1")]
     [Description("Defends loot from other players who dealt less damage than you.")]
     class LootDefender : RustPlugin
     {
@@ -104,12 +93,39 @@ namespace Oxide.Plugins
         {
             public float DamageDealt { get; set; }
             public DateTime Timestamp { get; set; }
-            public ulong teamID { get; set; }
+            
+            public string teamID { get; set; }
+
+            [JsonIgnore]
+            internal ulong _teamId { get; set; }
+
+            [JsonIgnore]
+            public ulong TeamID
+            {
+                get
+                {
+                    if (_teamId == 0 && !string.IsNullOrEmpty(teamID))
+                    {
+                        ulong id;
+                        if (ulong.TryParse(teamID, out id))
+                        {
+                            _teamId = id;
+                        }
+                    }
+
+                    return _teamId;
+                }
+                set
+                {
+                    _teamId = value;
+                    teamID = value.ToString();
+                }
+            }
 
             public DamageEntry(ulong teamID)
             {
                 Timestamp = DateTime.Now;
-                this.teamID = teamID;
+                TeamID = teamID;
             }
 
             public bool IsOutdated(int timeout) => timeout > 0 && DateTime.Now.Subtract(Timestamp).TotalSeconds >= timeout;
@@ -267,11 +283,11 @@ namespace Oxide.Plugins
 
                 float damage = 0f;
 
-                if (config.Report.UseTeams && entry.teamID != 0)
+                if (config.Report.UseTeams && entry.TeamID != 0)
                 {
                     foreach (var x in damageEntries.Values)
                     {
-                        if (x.teamID == entry.teamID)
+                        if (x.TeamID == entry.TeamID)
                         {
                             damage += x.DamageDealt;
                         }
@@ -927,19 +943,25 @@ namespace Oxide.Plugins
                 }
 
                 data.LockInfos.Remove(entity.net.ID);
-            }            
+            }
         }
 
-        private object CanLootEntity(BasePlayer player, StorageContainer container)
+        private object CanLootEntity(BasePlayer player, DroppedItemContainer container) => CanLootEntityHandler(player, container);
+
+        private object CanLootEntity(BasePlayer player, LootableCorpse corpse) => CanLootEntityHandler(player, corpse);
+
+        private object CanLootEntity(BasePlayer player, StorageContainer container) => CanLootEntityHandler(player, container);
+
+        private object CanLootEntityHandler(BasePlayer player, BaseEntity entity)
         {
-            if (!container.IsValid() || HasPermission(player, bypassLootPerm))
+            if (!entity.IsValid() || HasPermission(player, bypassLootPerm))
             {
                 return null;
             }
 
-            if (container is SupplyDrop || config.Hackable.Enabled && container is HackableLockedCrate)
+            if (entity is SupplyDrop || config.Hackable.Enabled && entity is HackableLockedCrate)
             {
-                if (!IsAlly(player.userID, container.OwnerID))
+                if (!IsAlly(player.userID, entity.OwnerID))
                 {
                     if (CanMessage(player))
                     {
@@ -953,15 +975,15 @@ namespace Oxide.Plugins
             }
 
             LockInfo lockInfo;
-            if (!data.LockInfos.TryGetValue(container.net.ID, out lockInfo))
+            if (!data.LockInfos.TryGetValue(entity.net.ID, out lockInfo))
             {
                 return null;
             }
 
             if (lockInfo.IsLockOutdated)
             {                
-                data.LockInfos.Remove(container.net.ID);
-                container.OwnerID = 0;
+                data.LockInfos.Remove(entity.net.ID);
+                entity.OwnerID = 0;
                 return null;
             }
 
