@@ -17,7 +17,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.0.1")]
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.0.2")]
     [Description("Defends loot from other players who dealt less damage than you.")]
     class LootDefender : RustPlugin
     {
@@ -32,7 +32,6 @@ namespace Oxide.Plugins
         private Dictionary<BradleyAPC, List<AttackerInfo>> _apcAttackers = new Dictionary<BradleyAPC, List<AttackerInfo>>();
         private Dictionary<uint, bool> _blackVenoms { get; set; } = new Dictionary<uint, bool>();
         private Dictionary<uint, ulong> _locked { get; set; } = new Dictionary<uint, ulong>();
-        private List<BaseEntity> _cargo { get; set; } = new List<BaseEntity>();
         private List<uint> _personal { get; set; } = new List<uint>();
         private List<string> _sent { get; set; } = new List<string>();
         private static StoredData data { get; set; } = new StoredData();
@@ -573,7 +572,7 @@ namespace Oxide.Plugins
                 }
 
                 RelationshipManager.PlayerTeam team;
-                if (!RelationshipManager.Instance.playerToTeam.TryGetValue(playerId, out team))
+                if (!RelationshipManager.ServerInstance.playerToTeam.TryGetValue(playerId, out team))
                 {
                     return;
                 }
@@ -600,6 +599,42 @@ namespace Oxide.Plugins
                 var damageLine = _("Format", playerId.ToString(), damage, percent);
 
                 return $"<color={color}>{displayName}</color> {damageLine}";
+            }
+        }
+
+        public class AirdropController : FacepunchBehaviour
+        {
+            public SupplyDrop drop;
+            public Rigidbody body;
+            public float y;
+
+            private void Awake()
+            {
+                drop = GetComponent<SupplyDrop>();
+                body = GetComponent<Rigidbody>();
+                
+                body.drag = 0f;
+            }
+
+            public void FixedUpdate()
+            {
+                if ((drop.transform.position.y - y) < 50f && body.drag < 3f)
+                {
+                    body.drag += 0.25f;
+                }
+
+                if (body.drag >= 3f)
+                {
+                    Destroy(this);
+                }
+            }
+
+            private void OnCollisionEnter(Collision collision)
+            {
+                if ((1 << collision.collider.gameObject.layer & 1084293393) > 0)
+                {
+                    Destroy(this);
+                }
             }
         }
 
@@ -637,7 +672,8 @@ namespace Oxide.Plugins
 
                 Subscribe(nameof(OnExplosiveDropped));
                 Subscribe(nameof(OnExplosiveThrown));
-                Subscribe(nameof(OnEntitySpawned));
+                Subscribe(nameof(OnSupplyDropDropped));
+                Subscribe(nameof(OnAirdrop));
             }
 
             if (!config.Bradley.LockPersonal)
@@ -675,6 +711,16 @@ namespace Oxide.Plugins
             Instance = null;
             data = null;
             sb = null;
+
+            var objects = UnityEngine.Object.FindObjectsOfType(typeof(AirdropController));
+
+            if (objects != null)
+            {
+                foreach (var gameObj in objects)
+                {
+                    UnityEngine.Object.Destroy(gameObj);
+                }
+            }
         }
 
         private void OnPlayerSleepEnded(BasePlayer player)
@@ -689,7 +735,18 @@ namespace Oxide.Plugins
 
         private object OnPlayerAttack(BasePlayer attacker, HitInfo hitInfo)
         {
-            if (attacker == null || HasPermission(attacker, bypassDamagePerm) || hitInfo == null || !(hitInfo.HitEntity is ServerGib))
+            if (attacker == null || HasPermission(attacker, bypassDamagePerm) || hitInfo == null)
+            {
+                return null;
+            }
+
+            if (config.Hackable.Laptop && hitInfo.HitBone == 242862488) // laptopcollision
+            {
+                hitInfo.HitBone = 0;
+                return null;
+            }
+
+            if (!(hitInfo.HitEntity is ServerGib))
             {
                 return null;
             }
@@ -708,7 +765,7 @@ namespace Oxide.Plugins
                         }
 
                         CancelDamage(hitInfo);
-                        return true;
+                        return false;
                     }
                 }
                 else
@@ -1021,7 +1078,7 @@ namespace Oxide.Plugins
 
         private void OnExplosiveThrown(BasePlayer player, SupplySignal ss, ThrownWeapon tw)
         {
-            if (player == null || ss == null)
+            if (player == null || ss == null || tw.skinID > 0) // Only native SupplySignal
             {
                 return;
             }
@@ -1071,13 +1128,11 @@ namespace Oxide.Plugins
             {
                 var plane = GameManager.server.CreateEntity(resourcePath) as CargoPlane;
 
-                _cargo.Add(plane);
-
                 plane.InitDropPosition(position);
                 plane.OwnerID = ownerID;
                 plane.Spawn();
-                plane.secondsToTake = Vector3.Distance(plane.endPos, plane.startPos) / Mathf.Clamp(config.SupplyDrop.Speed, 40f, World.Size);
                 plane.Invoke(() => plane.OwnerID = ownerID, 1f);
+                plane._name = position.ToString(); // Save SupplySignal position
             }
 
             if (!ss.IsDestroyed)
@@ -1088,40 +1143,50 @@ namespace Oxide.Plugins
             }
         }
 
-        private void OnEntitySpawned(SupplyDrop drop)
+        private void OnAirdrop(CargoPlane plane, Vector3 newDropPosition)
         {
-            if (drop == null || drop.OwnerID != 0)
-            {
+            if (plane.skinID > 0 || !plane.OwnerID.IsSteamId())
                 return;
-            }
 
-            _cargo.RemoveAll(x => x == null || x.IsDestroyed || x.transform == null);
+            float y = plane.transform.position.y / Core.Random.Range(2, 4); // Change Y, fast drop
 
-            BaseEntity plane = null;
+            plane.transform.position.Set(plane.transform.position.x, y, plane.transform.position.z);
+            plane.startPos.Set(plane.startPos.x, y, plane.startPos.z);
+            plane.endPos.Set(plane.endPos.x, y, plane.endPos.z);
+            plane.secondsToTake = Vector3.Distance(plane.startPos, plane.endPos) / Mathf.Clamp(config.SupplyDrop.Speed, 40f, World.Size);
+        }
 
-            foreach (var x in _cargo)
-            {
-                if ((x.transform.position - drop.transform.position).magnitude < 15f)
-                {
-                    plane = x;
-                    break;
-                }
-            }
-
-            if (plane == null)
-            {
-                return;
+        private void OnSupplyDropDropped(SupplyDrop drop, CargoPlane plane)
+        {
+            if (drop == null || plane == null || plane.skinID > 0 || drop.skinID > 0 || !plane.OwnerID.IsSteamId())
+            { 
+                return; // Only native CargoPlane and OwnerID
             }
 
             drop.OwnerID = plane.OwnerID;
 
-            var rb = drop.GetComponent<Rigidbody>();
+            var position = plane._name.ToVector3(); // Using position
 
-            if (rb != null)
+            if (position == Vector3.zero)
             {
-                rb.drag = Mathf.Clamp(config.SupplyDrop.Drag, 0.1f, 1f);
-                rb.collisionDetectionMode = CollisionDetectionMode.Continuous;
+                return;
             }
+
+            drop.transform.position = position;
+
+            if (!config.SupplyDrop.Fast)
+            {
+                return;
+            }
+
+            AirdropController controller = drop.gameObject.AddComponent<AirdropController>();
+
+            if (controller == null)
+            {
+                return;
+            }
+
+            controller.y = position.y;
         }
 
         private void OnSupplyDropLanded(SupplyDrop drop)
@@ -1325,7 +1390,7 @@ namespace Oxide.Plugins
             }
 
             RelationshipManager.PlayerTeam team;
-            if (!RelationshipManager.Instance.playerToTeam.TryGetValue(looterId, out team))
+            if (!RelationshipManager.ServerInstance.playerToTeam.TryGetValue(looterId, out team))
             {
                 return;
             }
@@ -1448,7 +1513,8 @@ namespace Oxide.Plugins
             Unsubscribe(nameof(OnSupplyDropLanded));
             Unsubscribe(nameof(OnEntityDeath));
             Unsubscribe(nameof(OnEntityKill));
-            Unsubscribe(nameof(OnEntitySpawned));
+            Unsubscribe(nameof(OnSupplyDropDropped));
+            Unsubscribe(nameof(OnAirdrop));
             Unsubscribe(nameof(OnEntityTakeDamage));
             Unsubscribe(nameof(OnPlayerAttack));
             Unsubscribe(nameof(CanLootEntity));
@@ -1506,7 +1572,7 @@ namespace Oxide.Plugins
         public bool IsOnSameTeam(ulong playerId, ulong targetId)
         {
             RelationshipManager.PlayerTeam team;
-            if (RelationshipManager.Instance.playerToTeam.TryGetValue(playerId, out team))
+            if (RelationshipManager.ServerInstance.playerToTeam.TryGetValue(playerId, out team))
             {
                 return team.members.Contains(targetId);
             }
@@ -2030,7 +2096,11 @@ namespace Oxide.Plugins
                 var memberIdString = memberId.ToString();
                 var memberName = covalence.Players.FindPlayerById(memberIdString)?.Name ?? memberIdString;
 
-                players[memberName] = $"https://www.battlemetrics.com/rcon/players?filter%5Bsearch%5D={memberIdString}&filter%5Bservers%5D=false&filter%5BplayerFlags%5D=&sort=score&showServers=true";
+                if (config.DiscordMessages.BattleMetrics)
+                {
+                    players[memberName] = $"https://www.battlemetrics.com/rcon/players?filter%5Bsearch%5D={memberIdString}&filter%5Bservers%5D=false&filter%5BplayerFlags%5D=&sort=score&showServers=true";
+                }
+                else players[memberName] = memberIdString;
             }
 
             SendDiscordMessage(players, position, damageEntryType == DamageEntryType.Bradley ? _("BradleyKilled") : _("HeliKilled"));
@@ -2153,6 +2223,9 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Lock For X Seconds (0 = Forever)")]
             public int LockTime { get; set; } = 900;
+
+            [JsonProperty(PropertyName = "Block Timer Increase On Damage To Laptop")]
+            public bool Laptop { get; set; } = true;
         }
 
         private class BradleySettings
@@ -2226,8 +2299,8 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Lock To Player For X Seconds (0 = Forever)")]
             public float LockTime { get; set; }
 
-            [JsonProperty(PropertyName = "Supply Drop Drag")]
-            public float Drag { get; set; } = 1f;
+            [JsonProperty(PropertyName = "Supply Drop Fast")]
+            public bool Fast { get; set; } = true;
 
             [JsonProperty(PropertyName = "Show Thrown Notification In Chat")]
             public bool NotifyChat { get; set; }
@@ -2324,6 +2397,9 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Embed_MessageServer")]
             public string EmbedMessageServer { get; set; } = "Connect via Steam:";
+
+            [JsonProperty(PropertyName = "Add BattleMetrics Link")]
+            public bool BattleMetrics { get; set; } = true;
         }
 
         private class Configuration
