@@ -1,4 +1,5 @@
 ﻿//#define DEBUG
+
 using Facepunch;
 using Newtonsoft.Json;
 using Oxide.Core;
@@ -9,7 +10,7 @@ using System.Linq;
 using UnityEngine;
 
 namespace Oxide.Plugins {
-    [Info("Loot Defender", "Egor Blagov", "1.0.2")]
+    [Info("Loot Defender", "Egor Blagov", "1.0.3")]
     [Description("Defends loot from other players who not involved into action")]
     class LootDefender : RustPlugin {
         [PluginReference]
@@ -45,7 +46,6 @@ namespace Oxide.Plugins {
         }
 
         #endregion
-
 
         #region Stored data
 
@@ -97,7 +97,6 @@ namespace Oxide.Plugins {
 
         #endregion
 
-
         #region L10N
 
         protected override void LoadDefaultMessages() {
@@ -125,7 +124,6 @@ namespace Oxide.Plugins {
         }
 
         #endregion
-
 
         #region Damage and Locks calculation
 
@@ -329,7 +327,6 @@ namespace Oxide.Plugins {
             SaveData();
         }
 
-
         private void Init() {
             Instance = this;
 
@@ -362,7 +359,11 @@ namespace Oxide.Plugins {
             }
 
             string nameKey = null;
-            if (entity is BaseHelicopter && PersonalHeli != null && !PersonalHeli.Call<bool>("IsPersonal", entity as BaseHelicopter))  {
+            if (entity is BaseHelicopter)  {
+                if (PersonalHeli != null && PersonalHeli.Call<bool>("IsPersonal", entity as BaseHelicopter)) {
+                    return;
+                }
+
                 nameKey = "Heli";
             }
 
@@ -403,7 +404,6 @@ namespace Oxide.Plugins {
             }
             return null;
         }
-
 
         private void OnEntityKill(BaseEntity entity) {
             if (entity?.net?.ID == null || (!damageInfos.ContainsKey(entity.net.ID) && !lockInfos.ContainsKey(entity.net.ID))) {
@@ -487,7 +487,6 @@ namespace Oxide.Plugins {
             }
             Facepunch.Pool.FreeList(ref entities);
         }
-
 
         [ConsoleCommand("testlootdef")]
         private void testlootdef(ConsoleSystem.Arg arg) {
