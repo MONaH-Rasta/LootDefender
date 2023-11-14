@@ -1,4 +1,4 @@
-﻿using Facepunch;
+using Facepunch;
 using Facepunch.Math;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -17,7 +17,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.0.2")]
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.0.3")]
     [Description("Defends loot from other players who dealt less damage than you.")]
     class LootDefender : RustPlugin
     {
@@ -1106,13 +1106,13 @@ namespace Oxide.Plugins
 
         private void Explode(SupplySignal ss, ulong ownerID, Vector3 position, string resourcePath)
         {
+            if (!ss.IsDestroyed)
+            {
+                position = ss.transform.position;
+            }
+
             if (config.SupplyDrop.Bypass)
             {
-                if (!ss.IsDestroyed)
-                {
-                    position = ss.transform.position;
-                }
-
                 var drop = GameManager.server.CreateEntity(StringPool.Get(3632568684), position) as SupplyDrop;
 
                 drop.OwnerID = ownerID;
@@ -1137,7 +1137,7 @@ namespace Oxide.Plugins
 
             if (!ss.IsDestroyed)
             {
-                ss.Invoke(ss.FinishUp, config.SupplyDrop.Bypass ? 4.5f : 210f);
+                ss.Invoke(ss.FinishUp, config.SupplyDrop.Bypass ? 4.5f : (config.SupplyDrop.Fast ? 10f : 210f));
                 ss.SetFlag(BaseEntity.Flags.On, true, false, true);
                 ss.SendNetworkUpdateImmediate(false);
             }
@@ -1172,7 +1172,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            drop.transform.position = position;
+            drop.transform.position = new Vector3(position.x, drop.transform.position.y, position.z);
 
             if (!config.SupplyDrop.Fast)
             {
