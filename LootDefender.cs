@@ -11,7 +11,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "1.0.4")]
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "1.0.5")]
     [Description("Defends loot from other players who dealt less damage than you.")]
     class LootDefender : RustPlugin
     {
@@ -22,7 +22,7 @@ namespace Oxide.Plugins
         private const string permUse = "lootdefender.use";
         private const string permAdm = "lootdefender.adm";
         private static LootDefender Instance;
-        
+
         #region Config
 
         class PluginConfig
@@ -354,7 +354,7 @@ namespace Oxide.Plugins
             public bool IsSingle => additionalPlayers.Count == 0;
             private ulong FirstDamagerDealer { get; set; }
             private List<ulong> additionalPlayers { get; } = new List<ulong>();
-            
+
             public DamageGroup(ulong playerId, float damage)
             {
                 TotalDamage = damage;
@@ -366,7 +366,7 @@ namespace Oxide.Plugins
                 }
 
                 var target = RelationshipManager.FindByID(playerId);
-                
+
                 if (!target.IsValid())
                 {
                     return;
@@ -381,7 +381,7 @@ namespace Oxide.Plugins
                 for (int i = 0; i < team.members.Count; i++)
                 {
                     ulong member = team.members[i];
-                    
+
                     if (member == playerId)
                     {
                         continue;
@@ -475,7 +475,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            var attacker = hitInfo.InitiatorPlayer;
+            var attacker = GetPlayerFromHitInfo(hitInfo);
 
             if (!attacker.IsValid() || attacker.IsNpc || !permission.UserHasPermission(attacker.UserIDString, permUse))
             {
@@ -483,24 +483,35 @@ namespace Oxide.Plugins
             }
 
             string nameKey = null;
+
             if (entity is BaseHelicopter)
             {
-                if (PersonalHeli != null && PersonalHeli.Call<bool>("IsPersonal", entity as BaseHelicopter))
-                {
-                    return;
-                }
+                var heli = entity as BaseHelicopter;
 
-                if (BlackVenom != null && BlackVenom.IsLoaded && entity.OwnerID.IsSteamId())
+                if (heli.IsValid())
                 {
-                    var success = BlackVenom.Call("IsBlackVenom", entity as BaseHelicopter, attacker);
-
-                    if (success is bool && !(bool)success)
+                    if (PersonalHeli != null && PersonalHeli.IsLoaded)
                     {
-                        return;
-                    }
-                }
+                        var success = PersonalHeli?.Call("IsPersonal", heli);
 
-                nameKey = "Heli";
+                        if (success != null && success is bool && (bool)success)
+                        {
+                            return;
+                        }
+                    }
+
+                    if (BlackVenom != null && BlackVenom.IsLoaded && entity.OwnerID.IsSteamId())
+                    {
+                        var success = BlackVenom?.Call("IsBlackVenom", heli, attacker);
+
+                        if (success != null && success is bool && !(bool)success)
+                        {
+                            return;
+                        }
+                    }
+
+                    nameKey = "Heli";
+                }
             }
 
             if (entity is BradleyAPC)
@@ -508,9 +519,14 @@ namespace Oxide.Plugins
                 nameKey = "Bradley";
             }
 
-            if (entity is BasePlayer && entity.IsNpc) // why npcs? :p
+            if (entity is BasePlayer) // why npcs? :p
             {
-                nameKey = (entity as BasePlayer).displayName;
+                var player = entity as BasePlayer;
+
+                if (player.IsValid() && player.IsNpc)
+                {
+                    nameKey = player.displayName;
+                }
             }
 
             if (string.IsNullOrEmpty(nameKey))
@@ -592,7 +608,7 @@ namespace Oxide.Plugins
                 var corpsePos = corpse.transform.position;
                 var corpseId = corpse.playerSteamID;
                 var lockInfo = lockInfos[corpse.net.ID];
-                NextTick(() => 
+                NextTick(() =>
                 {
                     var containers = Pool.GetList<DroppedItemContainer>();
                     Vis.Entities(corpsePos, 1.0f, containers);
@@ -662,6 +678,41 @@ namespace Oxide.Plugins
                 }
             }
             Pool.FreeList(ref entities);
+        }
+
+        private BasePlayer GetPlayerFromHitInfo(HitInfo hitInfo)
+        {
+            var player = hitInfo?.Initiator as BasePlayer;
+
+            if (!player.IsValid() && hitInfo?.Initiator is BaseMountable)
+            {
+                player = GetMountedPlayer(hitInfo.Initiator as BaseMountable);
+            }
+
+            return player;
+        }
+
+        private static BasePlayer GetMountedPlayer(BaseMountable m)
+        {
+            if (m.GetMounted())
+            {
+                return m.GetMounted();
+            }
+
+            if (m is BaseVehicle)
+            {
+                var vehicle = m as BaseVehicle;
+
+                foreach (var point in vehicle.mountPoints)
+                {
+                    if (point.mountable.IsValid() && point.mountable.GetMounted())
+                    {
+                        return point.mountable.GetMounted();
+                    }
+                }
+            }
+
+            return null;
         }
 
         private void CommandTest(IPlayer p, string command, string[] args)
