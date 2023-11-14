@@ -18,7 +18,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.1.0")]
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.1.1")]
     [Description("Defends loot from other players who dealt less damage than you.")]
     class LootDefender : RustPlugin
     {
@@ -37,6 +37,7 @@ namespace Oxide.Plugins
         private List<string> _sent { get; set; } = new List<string>();
         private static StoredData data { get; set; } = new StoredData();
         private MonumentInfo launchSite { get; set; }
+        private List<MonumentInfo> harbors { get; set; } = new List<MonumentInfo>();
         private List<ulong> ownerids = new List<ulong> { 0, 1337422, 3566257, 123425345634634 };
 
         public enum DamageEntryType
@@ -862,7 +863,7 @@ namespace Oxide.Plugins
 
         private object OnEntityTakeDamageHandler(BaseCombatEntity entity, HitInfo hitInfo, DamageEntryType damageEntryType, string npcName)
         {
-            if (entity.OwnerID == 755446)
+            if (!config.Bradley.LockConvoy && entity.OwnerID == 755446)
             {
                 return null;
             }
@@ -1033,9 +1034,24 @@ namespace Oxide.Plugins
                 return false;
             }
 
+            if (entity.name.Contains($"BradleyApc[{entity.net.ID}]"))
+            {
+                return config.Bradley.LockBradleyTiers;
+            }
+
             if (launchSite != null && IsInBounds(launchSite, entity.ServerPosition))
             {
                 return config.Bradley.LockLaunchSite;
+            }
+
+            if (harbors.Exists(mi => IsInBounds(mi, entity.ServerPosition)))
+            {
+                return config.Bradley.LockHarbor;
+            }
+
+            if (entity.OwnerID == 755446)
+            {
+                return config.Bradley.LockConvoy;
             }
 
             return config.Bradley.LockWorldly;
@@ -1156,7 +1172,7 @@ namespace Oxide.Plugins
                         CreateMessage(player, entity is SupplyDrop ? "CannotLootIt" : "CannotLootCrate");
                     }
 
-                    return false;
+                    return true;
                 }
                 
                 return null;
@@ -1183,7 +1199,7 @@ namespace Oxide.Plugins
                     Message(player, lockInfo.GetDamageReport(player.userID));
                 }
 
-                return false;
+                return true;
             }
             
             return null;
@@ -1385,8 +1401,12 @@ namespace Oxide.Plugins
                 timer.Once(10f, SetupLaunchSite);
                 return;
             }
-            
-            launchSite = TerrainMeta.Path.Monuments.FirstOrDefault(mi => mi.name.Contains("launch_site", CompareOptions.OrdinalIgnoreCase));
+
+            foreach (var mi in TerrainMeta.Path.Monuments)
+            {
+                if (mi.name.Contains("harbor_1") || mi.name.Contains("harbor_2")) harbors.Add(mi);
+                else if (mi.name.Contains("launch_site", CompareOptions.OrdinalIgnoreCase)) launchSite = mi;
+            }
         }
 
         private void SetupHackableCrate(BasePlayer owner, HackableLockedCrate crate)
@@ -2410,11 +2430,20 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Lock Bradley At Launch Site")]
             public bool LockLaunchSite { get; set; } = true;
 
+            [JsonProperty(PropertyName = "Lock Bradley At Harbor")]
+            public bool LockHarbor { get; set; }
+
             [JsonProperty(PropertyName = "Lock Bradley From Personal Apc Plugin")]
             public bool LockPersonal { get; set; } = true;
 
             //[JsonProperty(PropertyName = "Lock Bradley From Raidable Bases Plugin")]
             //public bool LockRaidableBases { get; set; } = true;
+
+            [JsonProperty(PropertyName = "Lock Bradley From Convoy Plugin")]
+            public bool LockConvoy { get; set; } = true;
+
+            [JsonProperty(PropertyName = "Lock Bradley From Bradley Tiers Plugin")]
+            public bool LockBradleyTiers { get; set; }
 
             [JsonProperty(PropertyName = "Lock Bradley From Everywhere Else")]
             public bool LockWorldly { get; set; } = true;
