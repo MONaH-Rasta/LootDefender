@@ -1,4 +1,4 @@
-﻿using Facepunch;
+using Facepunch;
 using Facepunch.Math;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -18,12 +18,12 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.1.2")]
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.1.3")]
     [Description("Defends loot from other players who dealt less damage than you.")]
     internal class LootDefender : RustPlugin
     {
         [PluginReference]
-        Plugin PersonalHeli, Friends, Clans, RustRewards;
+        Plugin PersonalHeli, Friends, Clans, RustRewards, HeliSignals, BradleyDrops;
 
         private static LootDefender Instance;
         private static StringBuilder sb;
@@ -1065,11 +1065,21 @@ namespace Oxide.Plugins
                 return config.Bradley.LockConvoy;
             }
 
+            if (BradleyDrops && BradleyDrops.CallHook("IsBradleyDrop", entity.skinID) != null)
+            {
+                return false;
+            }
+
             return config.Bradley.LockWorldly;
         }
 
         private bool CanLockHeli(BaseCombatEntity entity)
         {
+            if (HeliSignals && HeliSignals.CallHook("IsHeliSignalObject", entity.skinID) != null)
+            {
+                return false;
+            }
+            
             return config.Helicopter.Threshold > 0f;
         }
 
