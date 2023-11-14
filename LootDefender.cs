@@ -1,4 +1,4 @@
-using Facepunch;
+﻿using Facepunch;
 using Facepunch.Math;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -18,7 +18,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.1.3")]
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.1.4")]
     [Description("Defends loot from other players who dealt less damage than you.")]
     internal class LootDefender : RustPlugin
     {
@@ -157,6 +157,7 @@ namespace Oxide.Plugins
             public DamageEntryType damageEntryType { get; set; } = DamageEntryType.None;
             public string NPCName { get; set; }
             public ulong OwnerID { get; set; }
+            public DateTime start { get; set; }
             internal int _lockTime { get; set; }
             [JsonIgnore]
             internal BaseEntity _entity { get; set; }
@@ -185,13 +186,14 @@ namespace Oxide.Plugins
 
             public DamageInfo() { }
 
-            public DamageInfo(DamageEntryType damageEntryType, string NPCName, BaseEntity entity)
+            public DamageInfo(DamageEntryType damageEntryType, string NPCName, BaseEntity entity, DateTime start)
             {
                 _entity = entity;
                 _uid = entity.net.ID;
 
                 this.damageEntryType = damageEntryType;
                 this.NPCName = NPCName;
+                this.start = start;
 
                 Start();
             }
@@ -494,6 +496,13 @@ namespace Oxide.Plugins
                 sb.Length = 0;
                 sb.AppendLine($"{_("DamageReport", userid, $"<color={config.Report.Ok}>{nameKey}</color>")}:");
 
+                if (damageEntryType == DamageEntryType.Bradley || damageEntryType == DamageEntryType.Heli)
+                {
+                    var seconds = Math.Ceiling((DateTime.Now - start).TotalSeconds);
+
+                    sb.AppendLine($"{_("DamageTime", userid, nameKey, seconds)}");
+                }
+
                 if (damageGroups.Count > 0)
                 {
                     foreach (var damageGroup in damageGroups)
@@ -729,10 +738,10 @@ namespace Oxide.Plugins
                 Subscribe(nameof(OnCargoPlaneSignaled));
             }
 
-            if (!config.Npc.BossMonster)
+            if (config.Npc.BossMonster)
             {
-                Subscribe(nameof(OnBossSpawn));
-                Subscribe(nameof(OnBossKilled));
+                Unsubscribe(nameof(OnBossSpawn));
+                Unsubscribe(nameof(OnBossKilled));
             }
 
             if (!config.Bradley.LockPersonal)
@@ -837,7 +846,7 @@ namespace Oxide.Plugins
             return null;
         }
 
-        private object OnEntityTakeDamage(BaseHelicopter heli, HitInfo hitInfo)
+        private object OnEntityTakeDamage(PatrolHelicopter heli, HitInfo hitInfo)
         {
             if (config.Helicopter.Threshold == 0f || !heli.IsValid() || _personal.Contains(heli.net.ID) || hitInfo == null || heli.myAI == null || heli.myAI.isDead)
             {
@@ -874,7 +883,12 @@ namespace Oxide.Plugins
 
         private object OnEntityTakeDamageHandler(BaseCombatEntity entity, HitInfo hitInfo, DamageEntryType damageEntryType, string npcName)
         {
-            if (!config.Bradley.LockConvoy && entity.OwnerID == 755446)
+            if (!config.Bradley.LockConvoy && entity.skinID == 755446 && entity is BradleyAPC)
+            {
+                return null;
+            }
+
+            if (!config.Helicopter.LockConvoy && entity.skinID == 755446 && entity is BaseHelicopter)
             {
                 return null;
             }
@@ -906,7 +920,7 @@ namespace Oxide.Plugins
             DamageInfo damageInfo;
             if (!data.Damage.TryGetValue(entity.net.ID, out damageInfo))
             {
-                data.Damage[entity.net.ID] = damageInfo = new DamageInfo(damageEntryType, npcName, entity);
+                data.Damage[entity.net.ID] = damageInfo = new DamageInfo(damageEntryType, npcName, entity, DateTime.Now);
             }
 
             DamageEntry entry = damageInfo.Get(attacker);
@@ -1045,6 +1059,15 @@ namespace Oxide.Plugins
                 return false;
             }
 
+            if (entity.skinID != 0)
+            {
+                if (entity.skinID == 755446)
+                {
+                    return config.Bradley.LockConvoy;
+                }
+                return false;
+            }
+
             if (entity.name.Contains($"BradleyApc[{entity.net.ID}]"))
             {
                 return config.Bradley.LockBradleyTiers;
@@ -1058,11 +1081,6 @@ namespace Oxide.Plugins
             if (harbors.Exists(mi => IsInBounds(mi, entity.ServerPosition)))
             {
                 return config.Bradley.LockHarbor;
-            }
-
-            if (entity.OwnerID == 755446)
-            {
-                return config.Bradley.LockConvoy;
             }
 
             if (BradleyDrops && BradleyDrops.CallHook("IsBradleyDrop", entity.skinID) != null)
@@ -1079,7 +1097,14 @@ namespace Oxide.Plugins
             {
                 return false;
             }
-            
+            if (entity.skinID != 0)
+            {
+                if (entity.skinID == 755446)
+                {
+                    return config.Helicopter.LockConvoy;
+                }
+                return false;
+            }
             return config.Helicopter.Threshold > 0f;
         }
 
@@ -1096,6 +1121,7 @@ namespace Oxide.Plugins
                 if (damageEntryType == DamageEntryType.Bradley && !CanLockBradley(entity)) return;
                 if (damageEntryType == DamageEntryType.Heli && !CanLockHeli(entity)) return;
                 if (damageEntryType == DamageEntryType.NPC && !CanLockNpc(entity)) return;
+
                 if (damageEntryType == DamageEntryType.Bradley || damageEntryType == DamageEntryType.Heli)
                 {
                     var lockInfo = new LockInfo(damageInfo, damageEntryType == DamageEntryType.Heli ? config.Helicopter.LockTime : config.Bradley.LockTime);
@@ -1182,7 +1208,22 @@ namespace Oxide.Plugins
 
         private object CanLootEntityHandler(BasePlayer player, BaseEntity entity)
         {
-            if (!entity.IsValid() || HasPermission(player, bypassLootPerm) || ownerids.Contains(entity.OwnerID))
+            if (!entity.IsValid())
+            {
+                return null;
+            }
+
+            if (HasPermission(player, bypassLootPerm))
+            {
+                return null;
+            }
+
+            if (entity.OwnerID == 0)
+            {
+                return null;
+            }
+
+            if (ownerids.Contains(entity.OwnerID))
             {
                 return null;
             }
@@ -1193,17 +1234,17 @@ namespace Oxide.Plugins
                 {
                     return null;
                 }
-
+                
                 if (!IsAlly(player.userID, entity.OwnerID))
                 {
                     if (CanMessage(player))
                     {
                         CreateMessage(player, entity is SupplyDrop ? "CannotLootIt" : "CannotLootCrate");
                     }
-
+                    
                     return true;
                 }
-
+                
                 return null;
             }
 
@@ -1294,11 +1335,17 @@ namespace Oxide.Plugins
                 var resourcePath = ss.EntityToCreate.resourcePath;
 
                 ss.CancelInvoke(ss.Explode);
-                ss.Invoke(() => Explode(ss, userid, position, resourcePath), 3f);
+                ss.Invoke(() => Explode(ss, userid, position, resourcePath, player), 3f);
             }
 
-            if (config.SupplyDrop.NotifyChat)
+            if (config.SupplyDrop.NotifyChat && !thrown.Contains(player.userID))
             {
+                if (config.SupplyDrop.NotifyCooldown > 0)
+                {
+                    var userid = player.userID;
+                    thrown.Add(userid);
+                    timer.In(config.SupplyDrop.NotifyCooldown, () => thrown.Remove(userid));
+                }
                 foreach (var target in BasePlayer.activePlayerList)
                 {
                     if (config.SupplyDrop.ThrownAt)
@@ -1317,7 +1364,9 @@ namespace Oxide.Plugins
             Interface.CallHook("OnModifiedSupplySignal", player, ss, tw);
         }
 
-        private void Explode(SupplySignal ss, ulong userid, Vector3 position, string resourcePath)
+        private List<ulong> thrown = new List<ulong>();
+
+        private void Explode(SupplySignal ss, ulong userid, Vector3 position, string resourcePath, BasePlayer player)
         {
             if (!ss.IsDestroyed)
             {
@@ -2538,6 +2587,9 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Remove Fire From Crates")]
             public bool RemoveFireFromCrates { get; set; } = true;
 
+            [JsonProperty(PropertyName = "Lock Heli From Convoy Plugin")]
+            public bool LockConvoy { get; set; } = true;
+
             [JsonProperty(PropertyName = "Lock Heli From Personal Heli Plugin")]
             public bool LockPersonal { get; set; } = true;
 
@@ -2600,6 +2652,9 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Show Notification In Server Console")]
             public bool NotifyConsole { get; set; }
+
+            [JsonProperty(PropertyName = "Cooldown Between Notifications For Each Player")]
+            public float NotifyCooldown { get; set; }
 
             [JsonProperty(PropertyName = "Cargo Plane Speed (Meters Per Second)")]
             public float Speed { get; set; } = 40f;
@@ -2762,6 +2817,7 @@ namespace Oxide.Plugins
             {
                 ["NoPermission"] = "You do not have permission to use this command!",
                 ["DamageReport"] = "Damage report for {0}",
+                ["DamageTime"] = "{0} was taken down after {1} seconds",
                 ["CannotLoot"] = "You cannot loot this as major damage was not from you.",
                 ["CannotLootIt"] = "You cannot loot this supply drop.",
                 ["CannotLootCrate"] = "You cannot loot this crate.",
@@ -2787,6 +2843,7 @@ namespace Oxide.Plugins
             {
                 ["NoPermission"] = "У вас нет разрешения на использование этой команды!",
                 ["DamageReport"] = "Нанесенный урон по {0}",
+                ["DamageTime"] = "{0} was taken down after {1} seconds",
                 ["CannotLoot"] = "Это не ваш лут, основная часть урона насена не вами.",
                 ["CannotLootIt"] = "Вы не можете открыть этот ящик с припасами.",
                 ["CannotMine"] = "Вы не можете добывать это, основная часть урона насена не вами.",
