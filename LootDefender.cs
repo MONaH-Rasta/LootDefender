@@ -18,7 +18,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.1.4")]
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.1.5")]
     [Description("Defends loot from other players who dealt less damage than you.")]
     internal class LootDefender : RustPlugin
     {
@@ -288,7 +288,7 @@ namespace Oxide.Plugins
                 }
                 else damage = entry.DamageDealt;
 
-                if (config.Helicopter.Threshold > 0f && entity is BaseHelicopter)
+                if (config.Helicopter.Threshold > 0f && entity is PatrolHelicopter)
                 {
                     if (damage >= entity.MaxHealth() * config.Helicopter.Threshold)
                     {
@@ -888,7 +888,7 @@ namespace Oxide.Plugins
                 return null;
             }
 
-            if (!config.Helicopter.LockConvoy && entity.skinID == 755446 && entity is BaseHelicopter)
+            if (!config.Helicopter.LockConvoy && entity.skinID == 755446 && entity is PatrolHelicopter)
             {
                 return null;
             }
@@ -999,7 +999,7 @@ namespace Oxide.Plugins
             return null;
         }
 
-        private void OnEntityDeath(BaseHelicopter heli, HitInfo hitInfo)
+        private void OnEntityDeath(PatrolHelicopter heli, HitInfo hitInfo)
         {
             if (!heli.IsValid())
             {
@@ -1011,7 +1011,7 @@ namespace Oxide.Plugins
             OnEntityDeathHandler(heli, DamageEntryType.Heli, hitInfo);
         }
 
-        private void OnEntityKill(BaseHelicopter heli) => OnEntityDeath(heli, null);
+        private void OnEntityKill(PatrolHelicopter heli) => OnEntityDeath(heli, null);
 
         private void OnEntityDeath(BradleyAPC apc, HitInfo hitInfo)
         {
@@ -1291,7 +1291,7 @@ namespace Oxide.Plugins
             }
         }
 
-        private void OnPersonalHeliSpawned(BasePlayer player, BaseHelicopter heli)
+        private void OnPersonalHeliSpawned(BasePlayer player, PatrolHelicopter heli)
         {
             if (heli.IsValid())
             {
@@ -1783,7 +1783,7 @@ namespace Oxide.Plugins
             return null;
         }
 
-        private bool IsDefended(BaseHelicopter heli) => heli.IsValid() && (data.Lock.ContainsKey(heli.net.ID) || data.Damage.ContainsKey(heli.net.ID));
+        private bool IsDefended(PatrolHelicopter heli) => heli.IsValid() && (data.Lock.ContainsKey(heli.net.ID) || data.Damage.ContainsKey(heli.net.ID));
 
         private bool IsDefended(BaseCombatEntity victim) => victim.IsValid() && (_locked.ContainsKey(victim.net.ID) || data.Lock.ContainsKey(victim.net.ID));
 
