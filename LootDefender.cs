@@ -18,7 +18,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.0.4")]
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.0.5")]
     [Description("Defends loot from other players who dealt less damage than you.")]
     class LootDefender : RustPlugin
     {
@@ -73,7 +73,16 @@ namespace Oxide.Plugins
                 {
                     damageInfo.Value._entity = BaseNetworkable.serverEntities.Find(damageInfo.Key) as BaseEntity;
 
-                    if (damageInfo.Value._entity == null)
+                    if (damageInfo.Value.damageEntryType == DamageEntryType.NPC && !config.Npc.Enabled)
+                    {
+                        if (damageInfo.Value._entity.IsValid())
+                        {
+                            damageInfo.Value._entity.OwnerID = 0uL;
+                        }
+
+                        DamageInfos.Remove(damageInfo.Key);
+                    }
+                    else if (damageInfo.Value._entity == null)
                     {
                         DamageInfos.Remove(damageInfo.Key);
                     }
@@ -82,7 +91,18 @@ namespace Oxide.Plugins
 
                 foreach (var lockInfo in LockInfos.ToList())
                 {
-                    if (BaseNetworkable.serverEntities.Find(lockInfo.Key) == null)
+                    var entity = BaseNetworkable.serverEntities.Find(lockInfo.Key) as BaseEntity;
+
+                    if (lockInfo.Value.damageInfo.damageEntryType == DamageEntryType.NPC && !config.Npc.Enabled)
+                    {
+                        if (entity.IsValid())
+                        {
+                            entity.OwnerID = 0uL;
+                        }
+
+                        LockInfos.Remove(lockInfo.Key);
+                    }
+                    else if (entity == null)
                     {
                         LockInfos.Remove(lockInfo.Key);
                     }
@@ -138,7 +158,7 @@ namespace Oxide.Plugins
 
             private Dictionary<ulong, bool> canInteract { get; set; } = new Dictionary<ulong, bool>();
 
-            private DamageEntryType damageEntryType { get; set; }
+            public DamageEntryType damageEntryType { get; set; }
 
             private string NPCName { get; set; }
 
@@ -340,15 +360,9 @@ namespace Oxide.Plugins
 
             private ulong GetLockOwner(float maxhealth, float threshold)
             {
-                foreach (var entry in damageEntries)
-                {
-                    if (entry.Value.DamageDealt >= maxhealth * threshold)
-                    {
-                        return entry.Key;
-                    }
-                }
+                var max = damageEntries.Values.Max(x => x.DamageDealt);
 
-                return 0;
+                return damageEntries.FirstOrDefault(x => x.Value.DamageDealt.Equals(max)).Key;
             }
 
             public void OnKilled(Vector3 position)
@@ -472,6 +486,11 @@ namespace Oxide.Plugins
 
             public bool CanInteract(ulong playerId)
             {
+                if (damageEntryType == DamageEntryType.NPC && !config.Npc.Enabled)
+                {
+                    return true;
+                }
+
                 if (canInteract.ContainsKey(playerId))
                 {
                     return true;
@@ -846,9 +865,8 @@ namespace Oxide.Plugins
                 data.DamageInfos[entity.net.ID] = damageInfo = new DamageInfo(damageEntryType, npcName);
             }
 
-            ulong ownerId = _locked.ContainsKey(entity.net.ID) ? _locked[entity.net.ID] : 0uL;
-
-            if (ownerId != 0uL && !HasPermission(attacker, bypassDamagePerm) && !IsAlly(attacker.userID, ownerId))
+            ulong ownerId;
+            if (_locked.TryGetValue(entity.net.ID, out ownerId) && ownerId != 0uL && !HasPermission(attacker, bypassDamagePerm) && !IsAlly(attacker.userID, ownerId))
             {
                 if (!BlockDamage(damageEntryType))
                 {
@@ -1620,6 +1638,11 @@ namespace Oxide.Plugins
 
         private bool IsAlly(ulong playerId, ulong targetId)
         {
+            if (playerId == targetId)
+            {
+                return true;
+            }
+
             RelationshipManager.PlayerTeam team;
             if (RelationshipManager.ServerInstance.playerToTeam.TryGetValue(playerId, out team) && team.members.Contains(targetId))
             {
