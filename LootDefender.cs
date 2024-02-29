@@ -1,4 +1,4 @@
-﻿using Facepunch;
+using Facepunch;
 using Facepunch.Math;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -18,7 +18,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.1.5")]
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.1.6")]
     [Description("Defends loot from other players who dealt less damage than you.")]
     internal class LootDefender : RustPlugin
     {
@@ -889,6 +889,16 @@ namespace Oxide.Plugins
             }
 
             if (!config.Helicopter.LockConvoy && entity.skinID == 755446 && entity is PatrolHelicopter)
+            {
+                return null;
+            }
+
+            if (HeliSignals && HeliSignals.CallHook("IsHeliSignalObject", entity.skinID) != null)
+            {
+                return null;
+            }
+            
+            if (BradleyDrops && BradleyDrops.CallHook("IsBradleyDrop", entity.skinID) != null)
             {
                 return null;
             }
