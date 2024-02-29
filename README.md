@@ -124,4 +124,4 @@ Sorry, the screenshots are in Russian localization, but I hope you'll get the id
 ## Credits
 
 - Egor Blagov - original author
-- nivex - for maintaining the plugin
+- [nivex](https://umod.org/user/nivex) - for maintaining the plugin
