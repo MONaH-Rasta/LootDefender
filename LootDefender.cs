@@ -16,7 +16,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.1.8")]
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.1.9")]
     [Description("Defends loot from other players who dealt less damage than you.")]
     internal class LootDefender : RustPlugin
     {
@@ -945,7 +945,7 @@ namespace Oxide.Plugins
                 return null;
             }
 
-            if (_locked.TryGetValue(entity.net.ID.Value, out var ownerId) && !HasPermission(attacker, bypassDamagePerm) && !IsAlly(attacker.userID, ownerId) && !CanUnlock(entity, attacker.userID))
+            if (_locked.TryGetValue(entity.net.ID.Value, out var ownerId) && !HasPermission(attacker, bypassDamagePerm) && !IsAlly(attacker.userID, ownerId))
             {
                 if (!BlockDamage(damageEntryType))
                 {
@@ -993,20 +993,6 @@ namespace Oxide.Plugins
         }
 
         public static bool IsKilled(BaseNetworkable a) { try { return (object)a == null || a.IsDestroyed || a.transform == null; } catch { return true; } }
-
-        private bool CanUnlock(BaseEntity entity, ulong userid)
-        {
-            if (config.Helicopter.UnlockDist > 0f && entity is PatrolHelicopter && _locked.ContainsKey(entity.net.ID.Value) && !IsKilled(entity) && data.Damage.TryGetValue(entity.net.ID.Value, out var damageInfo))
-            {
-                if (damageInfo.interact.Values.All(attacker => IsKilled(attacker) || Vector3.Distance(entity.transform.position, attacker.transform.position) > config.Helicopter.UnlockDist))
-                {
-                    damageInfo.Unlock();
-                    damageInfo.damageKeys.RemoveAll(x => !IsAlly(userid, x.userid));
-                    return true;
-                }
-            }
-            return false;
-        }
 
         private bool BlockDamage(DamageEntryType damageEntryType)
         {
@@ -3028,9 +3014,6 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Lock For X Seconds (0 = Forever)")]
             public int LockTime { get; set; } = 900;
-
-            [JsonProperty(PropertyName = "Unlock Heli When X Distance From Owner (0 = Disabled)")]
-            public float UnlockDist { get; set; } = 1500f;
 
             [JsonProperty(PropertyName = "Remove Fire From Crates")]
             public bool RemoveFireFromCrates { get; set; } = true;
