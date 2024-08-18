@@ -1,13 +1,11 @@
-using Facepunch;
+﻿using Facepunch;
 using Facepunch.Math;
 using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
 using Oxide.Core;
 using Oxide.Core.Libraries.Covalence;
 using Oxide.Core.Plugins;
 using Oxide.Game.Rust;
 using Oxide.Game.Rust.Cui;
-using Rust;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -18,12 +16,12 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.1.6")]
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.1.8")]
     [Description("Defends loot from other players who dealt less damage than you.")]
     internal class LootDefender : RustPlugin
     {
         [PluginReference]
-        Plugin PersonalHeli, Friends, Clans, RustRewards, HeliSignals, BradleyDrops;
+        Plugin PersonalHeli, Friends, Clans, RustRewards, HeliSignals, BradleyDrops, HelpfulSupply, ShoppyStock, XLevels, XPerience, SkillTree;
 
         private static LootDefender Instance;
         private static StringBuilder sb;
@@ -31,15 +29,16 @@ namespace Oxide.Plugins
         private const string bypassLootPerm = "lootdefender.bypass.loot";
         private const string bypassDamagePerm = "lootdefender.bypass.damage";
         private const string bypassLockoutsPerm = "lootdefender.bypass.lockouts";
-        private Dictionary<BradleyAPC, List<DamageKey>> _apcAttackers = new Dictionary<BradleyAPC, List<DamageKey>>();
-        private Dictionary<NetworkableId, ulong> _locked { get; set; } = new Dictionary<NetworkableId, ulong>();
-        private List<NetworkableId> _personal { get; set; } = new List<NetworkableId>();
-        private List<NetworkableId> _boss { get; set; } = new List<NetworkableId>();
-        private List<string> _sent { get; set; } = new List<string>();
-        private static StoredData data { get; set; } = new StoredData();
+        private Dictionary<ulong, List<DamageKey>> _apcAttackers = new();
+        private Dictionary<ulong, List<DamageKey>> _heliAttackers = new();
+        private Dictionary<ulong, ulong> _locked { get; set; } = new();
+        private List<ulong> _personal { get; set; } = new();
+        private List<ulong> _boss { get; set; } = new();
+        private List<string> _sent { get; set; } = new();
+        private static StoredData data { get; set; } = new();
         private MonumentInfo launchSite { get; set; }
-        private List<MonumentInfo> harbors { get; set; } = new List<MonumentInfo>();
-        private List<ulong> ownerids = new List<ulong> { 0, 1337422, 3566257, 123425345634634 };
+        private List<MonumentInfo> harbors { get; set; } = new();
+        private List<ulong> ownerids = new() { 0, 1337422, 3566257, 123425345634634 };
 
         public enum DamageEntryType
         {
@@ -54,62 +53,66 @@ namespace Oxide.Plugins
         {
             public double Bradley { get; set; }
 
-            public bool Any() => Bradley > 0;
+            public double Heli { get; set; }
+
+            public bool Any() => Bradley > 0 ||  Heli > 0;
         }
 
         private class StoredData
         {
-            public Dictionary<string, Lockout> Lockouts { get; } = new Dictionary<string, Lockout>();
-            public Dictionary<string, UI.Info> UI { get; set; } = new Dictionary<string, UI.Info>();
-            public Dictionary<NetworkableId, DamageInfo> Damage { get; set; } = new Dictionary<NetworkableId, DamageInfo>();
-            public Dictionary<NetworkableId, LockInfo> Lock { get; set; } = new Dictionary<NetworkableId, LockInfo>();
+            public Dictionary<string, Lockout> Lockouts { get; } = new();
+            public Dictionary<string, UI.Info> UI { get; set; } = new();
+            [JsonProperty(PropertyName = "DamageInfo")]
+            public Dictionary<ulong, DamageInfo> Damage { get; set; } = new();
+            [JsonProperty(PropertyName = "LockInfo")]
+            public Dictionary<ulong, LockInfo> Lock { get; set; } = new();
 
             public void Sanitize()
             {
-                foreach (var damageInfo in Damage.ToList())
+                foreach (var (uid, damageInfo) in Damage.ToList())
                 {
-                    damageInfo.Value._entity = BaseNetworkable.serverEntities.Find(damageInfo.Key) as BaseEntity;
+                    damageInfo._entity = BaseNetworkable.serverEntities.Find(new(uid)) as BaseEntity;
 
-                    if (damageInfo.Value.damageEntryType == DamageEntryType.NPC && !config.Npc.Enabled)
+                    if (damageInfo.damageEntryType == DamageEntryType.NPC && !config.Npc.Enabled)
                     {
-                        if (damageInfo.Value._entity.IsValid())
+                        if (damageInfo._entity.IsValid())
                         {
-                            damageInfo.Value._entity.OwnerID = 0uL;
+                            damageInfo._entity.OwnerID = 0uL;
                         }
 
-                        Damage.Remove(damageInfo.Key);
+                        Damage.Remove(uid);
                     }
-                    else if (damageInfo.Value._entity == null)
+                    else if (damageInfo._entity == null)
                     {
-                        Damage.Remove(damageInfo.Key);
+                        Damage.Remove(uid);
                     }
                     else
                     {
-                        foreach (var x in damageInfo.Value.damageKeys)
+                        foreach (var x in damageInfo.damageKeys)
                         {
-                            x.attacker = BasePlayer.FindByID(x.id);
+                            x.attacker = BasePlayer.FindByID(x.userid);
                         }
 
-                        damageInfo.Value.Start();
+                        damageInfo.Start();
                     }
                 }
 
-                foreach (var lockInfo in Lock.ToList())
+                foreach (var (uid, lockInfo) in Lock.ToList())
                 {
-                    var entity = BaseNetworkable.serverEntities.Find(lockInfo.Key) as BaseEntity;
+                    var entity = BaseNetworkable.serverEntities.Find(new(uid)) as BaseEntity;
 
-                    if (lockInfo.Value.damageInfo.damageEntryType == DamageEntryType.NPC && !config.Npc.Enabled)
+                    if (lockInfo.damageInfo.damageEntryType == DamageEntryType.NPC && !config.Npc.Enabled)
                     {
                         if (entity.IsValid())
                         {
                             entity.OwnerID = 0uL;
                         }
 
-                        Lock.Remove(lockInfo.Key);
+                        Lock.Remove(uid);
                     }
                     else if (entity == null)
                     {
-                        Lock.Remove(lockInfo.Key);
+                        Lock.Remove(uid);
                     }
                 }
             }
@@ -134,7 +137,7 @@ namespace Oxide.Plugins
 
         private class DamageKey
         {
-            public ulong id { get; set; }
+            public ulong userid { get; set; }
             public string name { get; set; }
             public DamageEntry damageEntry { get; set; }
             internal BasePlayer attacker { get; set; }
@@ -144,28 +147,31 @@ namespace Oxide.Plugins
             public DamageKey(BasePlayer attacker)
             {
                 this.attacker = attacker;
-                id = attacker.userID;
+                userid = attacker.userID;
                 name = attacker.displayName;
             }
         }
 
         private class DamageInfo
         {
-            public List<DamageKey> damageKeys { get; set; } = new List<DamageKey>();
-            private List<ulong> interact { get; set; } = new List<ulong>();
-            private List<ulong> participants { get; set; } = new List<ulong>();
+            public List<DamageKey> damageKeys { get; set; } = new();
+            [JsonIgnore]
+            public Dictionary<ulong, BasePlayer> interact { get; set; } = new();
+            private List<ulong> participants { get; set; } = new();
             public DamageEntryType damageEntryType { get; set; } = DamageEntryType.None;
             public string NPCName { get; set; }
             public ulong OwnerID { get; set; }
+            public ulong SkinID { get; set; }
             public DateTime start { get; set; }
             internal int _lockTime { get; set; }
             [JsonIgnore]
             internal BaseEntity _entity { get; set; }
             internal Vector3 _position { get; set; }
-            internal NetworkableId _uid { get; set; }
+            internal Vector3 lastAttackedPosition { get; set; }
+            internal ulong _uid { get; set; }
             [JsonIgnore]
             internal Timer _timer { get; set; }
-            internal List<DamageKey> keys { get; set; } = new List<DamageKey>();
+            internal List<DamageKey> keys { get; set; } = new();
 
             List<DamageGroup> damageGroups;
 
@@ -173,14 +179,7 @@ namespace Oxide.Plugins
             {
                 get
                 {
-                    float sum = 0f;
-
-                    foreach (var x in damageKeys)
-                    {
-                        sum += x.damageEntry.DamageDealt;
-                    }
-
-                    return sum;
+                    return damageKeys.Sum(x => x.damageEntry.DamageDealt);
                 }
             }
 
@@ -188,8 +187,9 @@ namespace Oxide.Plugins
 
             public DamageInfo(DamageEntryType damageEntryType, string NPCName, BaseEntity entity, DateTime start)
             {
+                SkinID = entity.skinID;
                 _entity = entity;
-                _uid = entity.net.ID;
+                _uid = entity.net.ID.Value;
 
                 this.damageEntryType = damageEntryType;
                 this.NPCName = NPCName;
@@ -204,7 +204,7 @@ namespace Oxide.Plugins
                 _timer = Instance.timer.Every(1f, CheckExpiration);
             }
 
-            public void DestroyMe()
+            public void DestroyTimer()
             {
                 _timer?.Destroy();
             }
@@ -215,7 +215,7 @@ namespace Oxide.Plugins
                 {
                     if (x.damageEntry.IsOutdated(_lockTime))
                     {
-                        if (x.id == OwnerID)
+                        if (x.userid == OwnerID)
                         {
                             Unlock();
                         }
@@ -228,7 +228,7 @@ namespace Oxide.Plugins
                 keys.Clear();
             }
 
-            private void Unlock()
+            public void Unlock()
             {
                 OwnerID = 0;
 
@@ -237,7 +237,10 @@ namespace Oxide.Plugins
                     _entity.OwnerID = 0;
                 }
 
-                if (!Instance._locked.Remove(_uid)) return;
+                if (!Instance._locked.Remove(_uid))
+                {
+                    return;
+                }
 
                 if (damageEntryType == DamageEntryType.Bradley && config.Bradley.Messages.NotifyChat)
                 {
@@ -267,8 +270,29 @@ namespace Oxide.Plugins
                 entry.DamageDealt += amount;
                 entry.Timestamp = DateTime.Now;
                 _position = entity.transform.position;
+                lastAttackedPosition = attacker.transform.position;
 
-                if (!Update(entity))
+                if (SkinID == 0)
+                {
+                    SkinID = entity.skinID;
+                }
+
+                if (damageEntryType == DamageEntryType.NPC && !Instance.CanLockNpc(entity))
+                {
+                    return;
+                }
+
+                if (damageEntryType == DamageEntryType.Bradley && !Instance.CanLockBradley(entity))
+                {
+                    return;
+                }
+
+                if (entity.OwnerID.IsSteamId())
+                {
+                    OwnerID = entity.OwnerID;
+                }
+
+                if (OwnerID != 0uL)
                 {
                     return;
                 }
@@ -290,7 +314,7 @@ namespace Oxide.Plugins
 
                 if (config.Helicopter.Threshold > 0f && entity is PatrolHelicopter)
                 {
-                    if (damage >= entity.MaxHealth() * config.Helicopter.Threshold)
+                    if (damage >= entity.MaxHealth() * config.Helicopter.Threshold && !Instance.HasPermission(attacker, "lootdefender.bypasshelilock"))
                     {
                         if (config.Helicopter.Messages.NotifyLocked == true)
                         {
@@ -305,7 +329,7 @@ namespace Oxide.Plugins
                 }
                 else if (config.Bradley.Threshold > 0f && entity is BradleyAPC && Instance.CanLockBradley(entity))
                 {
-                    if (damage >= entity.MaxHealth() * config.Bradley.Threshold)
+                    if (damage >= entity.MaxHealth() * config.Bradley.Threshold && !Instance.HasPermission(attacker, "lootdefender.bypassbradleylock"))
                     {
                         if (config.Bradley.Messages.NotifyLocked == true)
                         {
@@ -318,42 +342,20 @@ namespace Oxide.Plugins
                         Lock(entity, attacker.userID);
                     }
                 }
-                else if (config.Npc.Threshold > 0f && entity is BasePlayer && Instance.CanLockNpc(entity))
+                else if (config.Npc.Threshold > 0f && entity is BasePlayer npc && Instance.CanLockNpc(npc))
                 {
-                    var npc = entity as BasePlayer;
-
-                    if (!npc.userID.IsSteamId() && damage >= entity.MaxHealth() * config.Npc.Threshold)
+                    if (!npc.userID.IsSteamId() && damage >= entity.MaxHealth() * config.Npc.Threshold && !Instance.HasPermission(attacker, "lootdefender.bypassnpclock"))
                     {
                         Lock(entity, attacker.userID);
                     }
                 }
             }
 
-            private bool Update(BaseEntity entity)
-            {
-                if (damageEntryType == DamageEntryType.NPC && !Instance.CanLockNpc(entity))
-                {
-                    return false;
-                }
-
-                if (damageEntryType == DamageEntryType.Bradley && !Instance.CanLockBradley(entity))
-                {
-                    return false;
-                }
-
-                if (entity.OwnerID.IsSteamId())
-                {
-                    OwnerID = entity.OwnerID;
-                }
-
-                return OwnerID == 0uL;
-            }
-
             public DamageEntry TryGet(ulong id)
             {
                 foreach (var x in damageKeys)
                 {
-                    if (x.id == id)
+                    if (x.userid == id)
                     {
                         return x.damageEntry;
                     }
@@ -368,37 +370,50 @@ namespace Oxide.Plugins
 
                 if (entry == null)
                 {
-                    damageKeys.Add(new DamageKey(attacker)
+                    damageKeys.Add(new(attacker)
                     {
-                        damageEntry = entry = new DamageEntry(attacker.currentTeam),
+                        damageEntry = entry = new(attacker.currentTeam),
                     });
                 }
 
                 return entry;
             }
 
-            public void OnKilled(Vector3 position)
+            public void OnKilled(Vector3 position, HitInfo hitInfo, float distance)
             {
                 SetCanInteract();
                 DisplayDamageReport();
-                LockoutBradleyLooters(position);
+                FindLooters(position, hitInfo, distance);
             }
 
-            private void LockoutBradleyLooters(Vector3 position)
+            private void FindLooters(Vector3 position, HitInfo hitInfo, float distance)
             {
-                if (damageEntryType == DamageEntryType.Bradley)
+                var weapon = hitInfo?.Weapon?.GetItem()?.info?.shortname ?? hitInfo?.WeaponPrefab?.ShortPrefabName ?? "";
+                List<ulong> looters = new();
+                List<ulong> users = new();
+                
+                foreach (var x in damageKeys)
                 {
-                    List<ulong> looters = new List<ulong>();
-
-                    foreach (var x in damageKeys)
+                    if (CanInteract(x.userid, x.attacker))
                     {
-                        if (CanInteract(x.id))
+                        if (TryGet(x.userid)?.DamageDealt > 0)
                         {
-                            looters.Add(x.id);
+                            users.Add(x.userid);
                         }
+                        looters.Add(x.userid);
                     }
+                }
 
-                    Instance.LockoutBradleyLooters(looters, position);
+                foreach (var userid in users)
+                {
+                    Instance.GiveXpReward(_entity, this, userid, weapon, users.Count);
+                    Instance.GiveRustReward(_entity, this, userid, weapon, users.Count);
+                    Instance.GiveShopReward(_entity, this, userid, weapon, distance, users.Count);
+                }
+
+                if (damageEntryType == DamageEntryType.Bradley || damageEntryType == DamageEntryType.Heli)
+                {
+                    Instance.LockoutLooters(looters, position, damageEntryType, SkinID);
                 }
             }
 
@@ -420,7 +435,7 @@ namespace Oxide.Plugins
                     {
                         if (CanDisplayReport(x.attacker))
                         {
-                            Message(x.attacker, GetDamageReport(x.id));
+                            Message(x.attacker, GetDamageReport(x.userid));
                         }
                     }
                 }
@@ -435,7 +450,7 @@ namespace Oxide.Plugins
 
                 if (damageEntryType == DamageEntryType.Bradley)
                 {
-                    if (config.Bradley.Messages.NotifyKiller && IsParticipant(target.userID))
+                    if (config.Bradley.Messages.NotifyKiller && IsParticipant(target.userID, target))
                     {
                         return true;
                     }
@@ -445,7 +460,7 @@ namespace Oxide.Plugins
 
                 if (damageEntryType == DamageEntryType.Heli)
                 {
-                    if (config.Helicopter.Messages.NotifyKiller && IsParticipant(target.userID))
+                    if (config.Helicopter.Messages.NotifyKiller && IsParticipant(target.userID, target))
                     {
                         return true;
                     }
@@ -455,7 +470,7 @@ namespace Oxide.Plugins
 
                 if (damageEntryType == DamageEntryType.NPC)
                 {
-                    if (config.Npc.Messages.NotifyKiller && IsParticipant(target.userID))
+                    if (config.Npc.Messages.NotifyKiller && IsParticipant(target.userID, target))
                     {
                         return true;
                     }
@@ -474,13 +489,32 @@ namespace Oxide.Plugins
                 {
                     foreach (var damageGroup in damageGroups)
                     {
-                        if (topDamageGroups.Contains(damageGroup) || Instance.IsAlly(OwnerID, damageGroup.FirstDamagerDealer.id))
+                        if (topDamageGroups.Contains(damageGroup) || Instance.IsAlly(OwnerID, damageGroup.FirstDamagerDealer.userid))
                         {
-                            interact.Add(damageGroup.FirstDamagerDealer.id);
+                            interact[damageGroup.FirstDamagerDealer.userid] = damageGroup.FirstDamagerDealer.attacker;
                         }
                         else
                         {
-                            participants.Add(damageGroup.FirstDamagerDealer.id);
+                            var damage = TryGet(damageGroup.FirstDamagerDealer.userid)?.DamageDealt ?? 0f;
+                            var dmgRatio = damage > 0 && FullDamage > 0 ? damage / FullDamage : 0;
+                            float threshold = config.Npc.Threshold;
+                            if (damageEntryType == DamageEntryType.Bradley)
+                            {
+                                threshold = config.Bradley.Threshold;
+                            }
+                            else if (damageEntryType == DamageEntryType.Heli)
+                            {
+                                threshold = config.Helicopter.Threshold;
+                            }
+                            if (OwnerID == 0 && dmgRatio >= threshold)
+                            {
+                                OwnerID = damageGroup.FirstDamagerDealer.userid;
+                                interact[damageGroup.FirstDamagerDealer.userid] = damageGroup.FirstDamagerDealer.attacker;
+                            }
+                            else
+                            {
+                                participants.Add(damageGroup.FirstDamagerDealer.userid);
+                            }
                         }
                     }
                 }
@@ -507,7 +541,7 @@ namespace Oxide.Plugins
                 {
                     foreach (var damageGroup in damageGroups)
                     {
-                        if (interact.Contains(damageGroup.FirstDamagerDealer.id))
+                        if (interact.ContainsKey(damageGroup.FirstDamagerDealer.userid))
                         {
                             sb.Append($"<color={config.Report.Ok}>√</color> ");
                             firstDamageDealer = damageGroup.FirstDamagerDealer.name;
@@ -529,12 +563,12 @@ namespace Oxide.Plugins
                 return sb.ToString();
             }
 
-            public bool IsParticipant(ulong userid)
+            public bool IsParticipant(ulong userid, BasePlayer player)
             {
-                return participants.Contains(userid) || CanInteract(userid);
+                return participants.Contains(userid) || CanInteract(userid, player);
             }
 
-            public bool CanInteract(ulong userid)
+            public bool CanInteract(ulong userid, BasePlayer player)
             {
                 if (damageEntryType == DamageEntryType.NPC && !config.Npc.Enabled)
                 {
@@ -548,14 +582,14 @@ namespace Oxide.Plugins
                     SetCanInteract();
                 }
 
-                if (interact.Count == 0 || interact.Contains(userid))
+                if (interact.Count == 0 || interact.ContainsKey(userid))
                 {
                     return true;
                 }
 
                 if (Instance.IsAlly(userid, OwnerID))
                 {
-                    interact.Add(userid);
+                    interact.Add(userid, player);
                     return true;
                 }
 
@@ -564,7 +598,7 @@ namespace Oxide.Plugins
 
             private List<DamageGroup> GetTopDamageGroups(List<DamageGroup> damageGroups, DamageEntryType damageEntryType)
             {
-                var topDamageGroups = new List<DamageGroup>();
+                List<DamageGroup> topDamageGroups = new();
 
                 if (damageGroups.Count == 0)
                 {
@@ -590,11 +624,11 @@ namespace Oxide.Plugins
 
             private List<DamageGroup> GetDamageGroups()
             {
-                var damageGroups = new List<DamageGroup>();
+                List<DamageGroup> damageGroups = new();
 
                 foreach (var x in damageKeys)
                 {
-                    damageGroups.Add(new DamageGroup(x));
+                    damageGroups.Add(new(x));
                 }
 
                 damageGroups.Sort((x, y) => y.TotalDamage.CompareTo(x.TotalDamage));
@@ -622,7 +656,7 @@ namespace Oxide.Plugins
                 this.damageInfo = damageInfo;
             }
 
-            public bool CanInteract(ulong userId) => damageInfo.CanInteract(userId);
+            public bool CanInteract(ulong userId, BasePlayer target) => damageInfo.CanInteract(userId, target);
 
             public string GetDamageReport(ulong userId) => damageInfo.GetDamageReport(userId);
         }
@@ -633,27 +667,27 @@ namespace Oxide.Plugins
 
             public DamageKey FirstDamagerDealer { get; set; }
 
-            private List<ulong> additionalPlayers { get; set; } = new List<ulong>();
+            private List<ulong> additionalPlayers { get; set; } = new();
 
             [JsonIgnore]
             public List<ulong> Players
             {
                 get
                 {
-                    var list = new List<ulong>
+                    List<ulong> players = new()
                     {
-                        FirstDamagerDealer.id
+                        FirstDamagerDealer.userid
                     };
 
                     foreach (var targetId in additionalPlayers)
                     {
-                        if (!list.Contains(targetId))
+                        if (!players.Contains(targetId))
                         {
-                            list.Add(targetId);
+                            players.Add(targetId);
                         }
                     }
 
-                    return list;
+                    return players;
                 }
             }
 
@@ -664,14 +698,13 @@ namespace Oxide.Plugins
                 TotalDamage = x.damageEntry.DamageDealt;
                 FirstDamagerDealer = x;
 
-                RelationshipManager.PlayerTeam team;
-                if (RelationshipManager.ServerInstance.playerToTeam.TryGetValue(x.id, out team))
+                if (RelationshipManager.ServerInstance.playerToTeam.TryGetValue(x.userid, out var team))
                 {
                     for (int i = 0; i < team.members.Count; i++)
                     {
                         ulong member = team.members[i];
 
-                        if (member == x.id || additionalPlayers.Contains(member))
+                        if (member == x.userid || additionalPlayers.Contains(member))
                         {
                             continue;
                         }
@@ -685,10 +718,10 @@ namespace Oxide.Plugins
 
             public string ToReport(DamageKey damageKey, DamageInfo damageInfo)
             {
-                var damage = damageInfo.TryGet(damageKey.id)?.DamageDealt ?? 0f;
+                var damage = damageInfo.TryGet(damageKey.userid)?.DamageDealt ?? 0f;
                 var percent = damage > 0 && damageInfo.FullDamage > 0 ? damage / damageInfo.FullDamage * 100 : 0;
                 var color = additionalPlayers.Count == 0 ? config.Report.SinglePlayer : config.Report.Team;
-                var damageLine = _("Format", damageKey.id.ToString(), damage, percent);
+                var damageLine = _("Format", damageKey.userid.ToString(), damage, percent);
 
                 return $"<color={color}>{damageKey.name}</color> {damageLine}";
             }
@@ -705,9 +738,12 @@ namespace Oxide.Plugins
         {
             Unsubscribe();
             Instance = this;
-            sb = new StringBuilder();
-            AddCovalenceCommand("testlootdef", nameof(CommandTest));
-            AddCovalenceCommand("lo", nameof(CommandUI));
+            sb = new();
+            if (!string.IsNullOrEmpty(config.Lockout.Command)) 
+                AddCovalenceCommand(config.Lockout.Command, nameof(CommandLockouts));
+            if (!string.IsNullOrEmpty(config.UI.Command)) 
+                AddCovalenceCommand(config.UI.Command, nameof(CommandUI));
+            AddCovalenceCommand("lo", nameof(CommandLootDefender));
             RegisterPermissions();
             LoadData();
         }
@@ -724,6 +760,10 @@ namespace Oxide.Plugins
             {
                 if (config.SupplyDrop.LockTime > 0)
                 {
+                    if (config.SupplyDrop.NpcRandomRaids)
+                    {
+                        Subscribe(nameof(OnRandomRaidWin));
+                    }
                     Subscribe(nameof(OnSupplyDropLanded));
                 }
 
@@ -732,10 +772,20 @@ namespace Oxide.Plugins
                     Subscribe(nameof(OnExcavatorSuppliesRequested));
                 }
 
+                if (config.SupplyDrop.HelpfulSupply && HelpfulSupply != null)
+                {
+                    Subscribe(nameof(OnEntitySpawned));
+                }
+
                 Subscribe(nameof(OnExplosiveDropped));
                 Subscribe(nameof(OnExplosiveThrown));
                 Subscribe(nameof(OnSupplyDropDropped));
                 Subscribe(nameof(OnCargoPlaneSignaled));
+            }
+
+            if (config.SupplyDrop.DestroyTime > 0f)
+            {
+                Subscribe(nameof(OnEntitySpawned));
             }
 
             if (config.Npc.BossMonster)
@@ -754,7 +804,7 @@ namespace Oxide.Plugins
                 Subscribe(nameof(OnPersonalHeliSpawned));
             }
 
-            if (config.UI.Bradley.Enabled)
+            if (config.UI.Bradley.Enabled || config.UI.Heli.Enabled)
             {
                 foreach (var player in BasePlayer.activePlayerList)
                 {
@@ -764,7 +814,7 @@ namespace Oxide.Plugins
                 Subscribe(nameof(OnPlayerSleepEnded));
             }
 
-            if (config.Bradley.Threshold != 0f || config.Helicopter.Threshold != 0f)
+            if (config.Bradley.Threshold != 0f || config.Helicopter.Threshold != 0f || config.Hackable.Laptop)
             {
                 Subscribe(nameof(OnPlayerAttack));
             }
@@ -803,43 +853,40 @@ namespace Oxide.Plugins
 
         private object OnPlayerAttack(BasePlayer attacker, HitInfo hitInfo)
         {
-            if (attacker == null || HasPermission(attacker, bypassDamagePerm) || hitInfo == null)
+            if (!attacker || HasPermission(attacker, bypassDamagePerm) || hitInfo == null)
             {
                 return null;
             }
 
-            if (config.Hackable.Laptop && hitInfo.HitBone == 242862488) // laptopcollision
+            if (config.Hackable.Laptop && hitInfo.HitBone == 242862488 && hitInfo.HitEntity is HackableLockedCrate crate && IsDefended(crate)) // laptopcollision
             {
                 hitInfo.HitBone = 0;
                 return null;
             }
 
-            if (!(hitInfo.HitEntity is ServerGib))
+            if (config.Bradley.Threshold != 0f || config.Helicopter.Threshold != 0f)
             {
-                return null;
-            }
-
-            LockInfo lockInfo;
-            if (data.Lock.TryGetValue(hitInfo.HitEntity.net.ID, out lockInfo))
-            {
-                if (hitInfo.HitEntity.OwnerID != 0 && !lockInfo.IsLockOutdated)
+                if (hitInfo.HitEntity is ServerGib gibs && gibs.IsValid() && data.Lock.TryGetValue(gibs.net.ID.Value, out var lockInfo))
                 {
-                    if (!lockInfo.CanInteract(attacker.userID))
+                    if (gibs.OwnerID != 0 && !lockInfo.IsLockOutdated)
                     {
-                        if (CanMessage(attacker))
+                        if (!lockInfo.CanInteract(attacker.userID, attacker))
                         {
-                            CreateMessage(attacker, "CannotMine");
-                            Message(attacker, lockInfo.GetDamageReport(attacker.userID));
-                        }
+                            if (CanMessage(attacker))
+                            {
+                                CreateMessage(attacker, "CannotMine");
+                                Message(attacker, lockInfo.GetDamageReport(attacker.userID));
+                            }
 
-                        CancelDamage(hitInfo);
-                        return false;
+                            CancelDamage(hitInfo);
+                            return false;
+                        }
                     }
-                }
-                else
-                {
-                    data.Lock.Remove(hitInfo.HitEntity.net.ID);
-                    hitInfo.HitEntity.OwnerID = 0;
+                    else
+                    {
+                        data.Lock.Remove(gibs.net.ID.Value);
+                        gibs.OwnerID = 0;
+                    }
                 }
             }
 
@@ -848,7 +895,7 @@ namespace Oxide.Plugins
 
         private object OnEntityTakeDamage(PatrolHelicopter heli, HitInfo hitInfo)
         {
-            if (config.Helicopter.Threshold == 0f || !heli.IsValid() || _personal.Contains(heli.net.ID) || hitInfo == null || heli.myAI == null || heli.myAI.isDead)
+            if (config.Helicopter.Threshold == 0f || !heli.IsValid() || _personal.Contains(heli.net.ID.Value) || hitInfo == null || heli.myAI == null || heli.myAI.isDead || CanHeliTakeDamage(heli, hitInfo) != null)
             {
                 return null;
             }
@@ -893,25 +940,12 @@ namespace Oxide.Plugins
                 return null;
             }
 
-            if (HeliSignals && HeliSignals.CallHook("IsHeliSignalObject", entity.skinID) != null)
-            {
-                return null;
-            }
-            
-            if (BradleyDrops && BradleyDrops.CallHook("IsBradleyDrop", entity.skinID) != null)
+            if (!(hitInfo.Initiator is BasePlayer attacker) || !attacker.userID.IsSteamId())
             {
                 return null;
             }
 
-            var attacker = hitInfo.Initiator as BasePlayer;
-
-            if (!attacker.IsValid() || !attacker.userID.IsSteamId())
-            {
-                return null;
-            }
-
-            ulong ownerId;
-            if (_locked.TryGetValue(entity.net.ID, out ownerId) && !HasPermission(attacker, bypassDamagePerm) && !IsAlly(attacker.userID, ownerId))
+            if (_locked.TryGetValue(entity.net.ID.Value, out var ownerId) && !HasPermission(attacker, bypassDamagePerm) && !IsAlly(attacker.userID, ownerId) && !CanUnlock(entity, attacker.userID))
             {
                 if (!BlockDamage(damageEntryType))
                 {
@@ -927,10 +961,9 @@ namespace Oxide.Plugins
                 return true;
             }
 
-            DamageInfo damageInfo;
-            if (!data.Damage.TryGetValue(entity.net.ID, out damageInfo))
+            if (!data.Damage.TryGetValue(entity.net.ID.Value, out var damageInfo))
             {
-                data.Damage[entity.net.ID] = damageInfo = new DamageInfo(damageEntryType, npcName, entity, DateTime.Now);
+                data.Damage[entity.net.ID.Value] = damageInfo = new(damageEntryType, npcName, entity, DateTime.Now);
             }
 
             DamageEntry entry = damageInfo.Get(attacker);
@@ -959,6 +992,22 @@ namespace Oxide.Plugins
             return null;
         }
 
+        public static bool IsKilled(BaseNetworkable a) { try { return (object)a == null || a.IsDestroyed || a.transform == null; } catch { return true; } }
+
+        private bool CanUnlock(BaseEntity entity, ulong userid)
+        {
+            if (config.Helicopter.UnlockDist > 0f && entity is PatrolHelicopter && _locked.ContainsKey(entity.net.ID.Value) && !IsKilled(entity) && data.Damage.TryGetValue(entity.net.ID.Value, out var damageInfo))
+            {
+                if (damageInfo.interact.Values.All(attacker => IsKilled(attacker) || Vector3.Distance(entity.transform.position, attacker.transform.position) > config.Helicopter.UnlockDist))
+                {
+                    damageInfo.Unlock();
+                    damageInfo.damageKeys.RemoveAll(x => !IsAlly(userid, x.userid));
+                    return true;
+                }
+            }
+            return false;
+        }
+
         private bool BlockDamage(DamageEntryType damageEntryType)
         {
             if (damageEntryType == DamageEntryType.NPC && config.Npc.LootingOnly)
@@ -979,14 +1028,12 @@ namespace Oxide.Plugins
 
         private object CanBradleyTakeDamage(BradleyAPC apc, HitInfo hitInfo)
         {
-            if (config.Lockout.Bradley <= 0 || !apc.IsValid() || !(hitInfo.Initiator is BasePlayer))
+            if (config.Lockout.Bradley <= 0 || !apc.IsValid() || !(hitInfo.Initiator is BasePlayer attacker))
             {
                 return null;
             }
 
-            var attacker = hitInfo.Initiator as BasePlayer;
-
-            if (HasLockout(attacker, DamageEntryType.Bradley))
+            if (HasLockout(attacker, DamageEntryType.Bradley, apc.skinID))
             {
                 CancelDamage(hitInfo);
                 return false;
@@ -994,15 +1041,43 @@ namespace Oxide.Plugins
 
             if (!data.Lockouts.ContainsKey(attacker.UserIDString))
             {
-                List<DamageKey> attackers;
-                if (!_apcAttackers.TryGetValue(apc, out attackers))
+                if (!_apcAttackers.TryGetValue(apc.net.ID.Value, out var attackers))
                 {
-                    _apcAttackers[apc] = attackers = new List<DamageKey>();
+                    _apcAttackers[apc.net.ID.Value] = attackers = new();
                 }
 
-                if (!attackers.Exists(x => x.id == attacker.userID))
+                if (!attackers.Exists(x => x.userid == attacker.userID))
                 {
-                    attackers.Add(new DamageKey(attacker));
+                    attackers.Add(new(attacker));
+                }
+            }
+
+            return null;
+        }
+
+        private object CanHeliTakeDamage(PatrolHelicopter heli, HitInfo hitInfo)
+        {
+            if (config.Lockout.Heli <= 0 || !heli.IsValid() || !(hitInfo.Initiator is BasePlayer attacker))
+            {
+                return null;
+            }
+
+            if (HasLockout(attacker, DamageEntryType.Heli, heli.skinID))
+            {
+                CancelDamage(hitInfo);
+                return false;
+            }
+
+            if (!data.Lockouts.ContainsKey(attacker.UserIDString))
+            {
+                if (!_heliAttackers.TryGetValue(heli.net.ID.Value, out var attackers))
+                {
+                    _heliAttackers[heli.net.ID.Value] = attackers = new();
+                }
+
+                if (!attackers.Exists(x => x.userid == attacker.userID))
+                {
+                    attackers.Add(new(attacker));
                 }
             }
 
@@ -1016,7 +1091,8 @@ namespace Oxide.Plugins
                 return;
             }
 
-            _personal.Remove(heli.net.ID);
+            _personal.Remove(heli.net.ID.Value);
+            _heliAttackers.Remove(heli.net.ID.Value);
 
             OnEntityDeathHandler(heli, DamageEntryType.Heli, hitInfo);
         }
@@ -1030,7 +1106,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            _apcAttackers.Remove(apc);
+            _apcAttackers.Remove(apc.net.ID.Value);
 
             OnEntityDeathHandler(apc, DamageEntryType.Bradley, hitInfo);
         }
@@ -1064,9 +1140,19 @@ namespace Oxide.Plugins
 
         private bool CanLockBradley(BaseEntity entity)
         {
-            if (config.Bradley.Threshold == 0f || _personal.Contains(entity.net.ID))
+            if (config.Bradley.Threshold <= 0f || _personal.Contains(entity.net.ID.Value))
             {
                 return false;
+            }
+
+            if (BradleyDrops && BradleyDrops.CallHook("IsBradleyDrop", entity.skinID) != null)
+            {
+                return false;
+            }
+
+            if (entity.name.Contains($"BradleyApc[{entity.net.ID}]"))
+            {
+                return config.Bradley.LockBradleyTiers;
             }
 
             if (entity.skinID != 0)
@@ -1075,12 +1161,15 @@ namespace Oxide.Plugins
                 {
                     return config.Bradley.LockConvoy;
                 }
+                if (entity.skinID == 81182151852251420)
+                {
+                    return config.Bradley.LockHarbor;
+                }
+                if (entity.skinID == 8675309)
+                {
+                    return config.Bradley.LockMonument;
+                }
                 return false;
-            }
-
-            if (entity.name.Contains($"BradleyApc[{entity.net.ID}]"))
-            {
-                return config.Bradley.LockBradleyTiers;
             }
 
             if (launchSite != null && IsInBounds(launchSite, entity.ServerPosition))
@@ -1091,11 +1180,6 @@ namespace Oxide.Plugins
             if (harbors.Exists(mi => IsInBounds(mi, entity.ServerPosition)))
             {
                 return config.Bradley.LockHarbor;
-            }
-
-            if (BradleyDrops && BradleyDrops.CallHook("IsBradleyDrop", entity.skinID) != null)
-            {
-                return false;
             }
 
             return config.Bradley.LockWorldly;
@@ -1113,6 +1197,10 @@ namespace Oxide.Plugins
                 {
                     return config.Helicopter.LockConvoy;
                 }
+                if (entity.skinID == 81182151852251420)
+                {
+                    return config.Helicopter.LockHarbor == true;
+                }
                 return false;
             }
             return config.Helicopter.Threshold > 0f;
@@ -1120,13 +1208,16 @@ namespace Oxide.Plugins
 
         private bool CanLockNpc(BaseEntity entity)
         {
-            return config.Npc.Threshold > 0f && !_boss.Contains(entity.net.ID);
+            if (entity.OwnerID.ToString().Length == 5)
+            {
+                return false;
+            }
+            return config.Npc.Threshold > 0f && !_boss.Contains(entity.net.ID.Value);
         }
 
         private void OnEntityDeathHandler(BaseCombatEntity entity, DamageEntryType damageEntryType, HitInfo hitInfo)
         {
-            DamageInfo damageInfo;
-            if (data.Damage.TryGetValue(entity.net.ID, out damageInfo))
+            if (data.Damage.TryGetValue(entity.net.ID.Value, out var damageInfo))
             {
                 if (damageEntryType == DamageEntryType.Bradley && !CanLockBradley(entity)) return;
                 if (damageEntryType == DamageEntryType.Heli && !CanLockHeli(entity)) return;
@@ -1137,7 +1228,7 @@ namespace Oxide.Plugins
                     var lockInfo = new LockInfo(damageInfo, damageEntryType == DamageEntryType.Heli ? config.Helicopter.LockTime : config.Bradley.LockTime);
                     var position = entity.transform.position;
 
-                    damageInfo.OnKilled(position);
+                    damageInfo.OnKilled(position, hitInfo, hitInfo?.ProjectileDistance ?? Vector3.Distance(position, damageInfo.lastAttackedPosition));
 
                     timer.Once(0.1f, () =>
                     {
@@ -1146,51 +1237,77 @@ namespace Oxide.Plugins
                         RemoveFireFromCrates(position, damageEntryType);
                     });
 
-                    GiveRustReward(entity, hitInfo, damageInfo);
+                    damageInfo.DestroyTimer();
                 }
-                else if (damageEntryType == DamageEntryType.NPC && config.Npc.Enabled)
+                else if (damageEntryType == DamageEntryType.NPC && config.Npc.Enabled && entity is BasePlayer npc)
                 {
                     var position = entity.transform.position;
-                    var npc = entity as BasePlayer;
                     var npcId = npc.userID;
+                    var damageKey = npc.net.ID.Value;
 
-                    damageInfo.OnKilled(position);
+                    damageInfo.OnKilled(position, hitInfo, hitInfo?.ProjectileDistance ?? Vector3.Distance(position, damageInfo.lastAttackedPosition));
+                    damageInfo.DestroyTimer();
 
-                    timer.Once(0.1f, () => LockInRadius(position, damageInfo, npcId));
-
-                    GiveRustReward(entity, hitInfo, damageInfo);
+                    timer.Once(0.1f, () => LockInRadius(position, damageKey, damageInfo, npcId));
                 }
+                else if (damageEntryType == DamageEntryType.NPC && config.Npc.Enabled && entity is LootableCorpse corpse)
+                {
+                    var position = entity.transform.position;
+                    var npcId = corpse.playerSteamID;
+                    var damageKey = corpse.net.ID.Value;
 
-                damageInfo.DestroyMe();
-                data.Damage.Remove(entity.net.ID);
+                    damageInfo.OnKilled(position, hitInfo, hitInfo?.ProjectileDistance ?? Vector3.Distance(position, damageInfo.lastAttackedPosition));
+                    damageInfo.DestroyTimer();
+
+                    timer.Once(0.1f, () => LockInRadius(position, damageKey, damageInfo, npcId));
+                }
             }
 
-            LockInfo lockInfo2;
-            if (data.Lock.TryGetValue(entity.net.ID, out lockInfo2))
+            if (data.Lock.Remove(entity.net.ID.Value, out var lockInfo2) && damageEntryType == DamageEntryType.Corpse && config.Npc.Enabled && entity is LootableCorpse corpse2)
             {
-                if (damageEntryType == DamageEntryType.Corpse && config.Npc.Enabled)
-                {
-                    var corpse = entity as NPCPlayerCorpse;
-                    var corpsePos = corpse.transform.position;
-                    var corpseId = corpse.playerSteamID;
+                var corpsePos = corpse2.transform.position;
+                var corpseId = corpse2.playerSteamID;
 
-                    timer.Once(0.1f, () => LockInRadius(corpsePos, lockInfo2, corpseId));
-                }
-
-                data.Lock.Remove(entity.net.ID);
+                timer.Once(0.1f, () => LockInRadius(corpsePos, lockInfo2, corpseId));
             }
         }
 
-        void GiveRustReward(BaseEntity entity, HitInfo hitInfo, DamageInfo damageInfo)
+        //void OnEntitySpawned(DroppedItemContainer container)
+        //{
+        //    if (!config.Npc.Enabled || !container.IsValid() || container.playerSteamID.IsSteamId() || data.Lock.ContainsKey(container.net.ID.Value))
+        //    {
+        //        return;
+        //    }
+        //    foreach (var damageInfo in data.Damage.Values)
+        //    {
+        //        if (damageInfo.damageEntryType == DamageEntryType.NPC && container.Distance(damageInfo._position) <= 3f)
+        //        {
+        //            if (config.Npc.LockTime > 0f)
+        //            {
+        //                var uid = container.net.ID.Value;
+
+        //                timer.Once(config.Npc.LockTime, () => data.Lock.Remove(uid));
+        //                container.Invoke(() => container.OwnerID = 0, config.Npc.LockTime);
+        //            }
+
+        //            ulong ownerid = damageInfo.OwnerID;
+        //            container.OwnerID = ownerid;
+        //            container.Invoke(() => container.OwnerID = ownerid, 1f);
+        //            data.Lock[container.net.ID.Value] = new(damageInfo, config.Npc.LockTime);
+        //        }
+        //    }
+        //}
+
+        void GiveRustReward(BaseEntity entity, DamageInfo damageInfo, ulong userid, string weapon, int total)
         {
-            if (RustRewards == null || hitInfo == null)
+            if (RustRewards == null)
             {
                 return;
             }
 
-            BasePlayer attacker = BasePlayer.FindByID(damageInfo.OwnerID) ?? hitInfo.Initiator as BasePlayer;
+            BasePlayer attacker = BasePlayer.FindByID(userid);
 
-            if (attacker == null)
+            if (!attacker || !attacker.userID.IsSteamId())
             {
                 return;
             }
@@ -1202,10 +1319,84 @@ namespace Oxide.Plugins
                 return;
             }
 
-            var weapon = hitInfo?.Weapon?.GetItem()?.info?.shortname ?? hitInfo?.WeaponPrefab?.ShortPrefabName ?? "";
             var distance = Vector3.Distance(attacker.transform.position, entity.transform.position);
 
             RustRewards?.Call("GiveRustReward", attacker, 0, amount, entity, weapon, distance, entity.ShortPrefabName);
+        }
+
+        void GiveXpReward(BaseEntity entity, DamageInfo damageInfo, ulong userid, string weapon, int total)
+        {
+            var amount = damageInfo.damageEntryType == DamageEntryType.Bradley ? config.Bradley.XP : damageInfo.damageEntryType == DamageEntryType.Heli ? config.Helicopter.XP : config.Npc.XP;
+
+            if (amount <= 0.0 || !userid.IsSteamId())
+            {
+                return;
+            }
+
+            var attacker = BasePlayer.FindByID(userid);
+
+            if (SkillTree != null)
+            {
+                if (attacker) SkillTree?.Call("AwardXP", attacker, amount, Name);
+                else SkillTree?.Call("AwardXP", userid, amount, Name);
+            }
+
+            if (XPerience != null)
+            {
+                XPerience?.Call("GiveXPID", userid, amount);
+            }
+
+            if (XLevels != null && attacker != null)
+            {
+                XLevels?.Call("API_GiveXP", attacker, (float)amount);
+            }
+        }
+
+        void GiveShopReward(BaseEntity entity, DamageInfo damageInfo, ulong userid, string weapon, float distance, int total)
+        {
+            if (ShoppyStock == null)
+            {
+                return;
+            }
+
+            var amount = damageInfo.damageEntryType == DamageEntryType.Bradley ? config.Bradley.SS : damageInfo.damageEntryType == DamageEntryType.Heli ? config.Helicopter.SS : config.Npc.SS;
+
+            if (!amount.HasValue || amount.Value <= 0.0)
+            {
+                return;
+            }
+
+            var storeName = damageInfo.damageEntryType == DamageEntryType.Bradley ? config.Bradley.ShoppyStockShopName : damageInfo.damageEntryType == DamageEntryType.Heli ? config.Helicopter.ShoppyStockShopName : config.Npc.ShoppyStockShopName;
+
+            if (string.IsNullOrEmpty(storeName))
+            {
+                return;
+            }
+
+            if (damageInfo.damageEntryType == DamageEntryType.NPC)
+			{
+                if (distance > 400) distance = 401;
+                var distanceMulti = config.Npc.Distance.GetDistanceMult(distance);
+                amount = Math.Round(distanceMulti * amount.Value, 0);
+                if (Interface.Oxide.CallHook("OnNpcWeaponMult", userid, weapon, distance) is float weaponMulti)
+                {
+                    amount = Math.Round(weaponMulti * amount.Value, 0);
+                    if (amount < 1) amount = 1;
+                }
+                if (amount <= 0) return;
+			}
+
+            amount /= total;
+            amount = Math.Round(amount.Value, 0);
+
+            ShoppyStock?.Call("GiveCurrency", storeName, userid, Mathf.Max(1, (int)amount));
+
+            if (!(BasePlayer.FindByID(userid) is BasePlayer attacker) || !attacker.IsConnected)
+                return;
+
+            string msg = "<color=#DDDDDD>Added</color> <color=#57F1EC>" + amount + "</color> <color=#8BE18A>" + storeName + "</color> <color=#DDDDDD>to your account.</color>";
+
+            Player.Message(attacker, msg, config.ChatID);
         }
 
         private object OnAutoPickupEntity(BasePlayer player, BaseEntity entity) => CanLootEntityHandler(player, entity);
@@ -1238,40 +1429,39 @@ namespace Oxide.Plugins
                 return null;
             }
 
-            if (entity is SupplyDrop && entity.skinID == supplyDropSkinID || config.Hackable.Enabled && entity is HackableLockedCrate)
+            if (entity is SupplyDrop && entity.skinID == supplyDropSkinID || config.Hackable.Enabled && entity is HackableLockedCrate crate && IsDefended(crate))
             {
                 if (Convert.ToBoolean(Interface.CallHook("OnLootLockedEntity", player, entity)))
                 {
                     return null;
                 }
-                
+
                 if (!IsAlly(player.userID, entity.OwnerID))
                 {
                     if (CanMessage(player))
                     {
                         CreateMessage(player, entity is SupplyDrop ? "CannotLootIt" : "CannotLootCrate");
                     }
-                    
+
                     return true;
                 }
-                
+
                 return null;
             }
 
-            LockInfo lockInfo;
-            if (!data.Lock.TryGetValue(entity.net.ID, out lockInfo))
+            if (!data.Lock.TryGetValue(entity.net.ID.Value, out var lockInfo))
             {
                 return null;
             }
 
             if (entity.OwnerID == 0 || lockInfo.IsLockOutdated)
             {
-                data.Lock.Remove(entity.net.ID);
+                data.Lock.Remove(entity.net.ID.Value);
                 entity.OwnerID = 0;
                 return null;
             }
 
-            if (!lockInfo.CanInteract(player.userID) && Interface.CallHook("OnLootLockedEntity", player, entity) == null)
+            if (!lockInfo.CanInteract(player.userID, player) && Interface.CallHook("OnLootLockedEntity", player, entity) == null)
             {
                 if (CanMessage(player))
                 {
@@ -1289,7 +1479,7 @@ namespace Oxide.Plugins
         {
             if (boss.IsValid())
             {
-                _boss.Add(boss.net.ID);
+                _boss.Add(boss.net.ID.Value);
             }
         }
 
@@ -1297,7 +1487,7 @@ namespace Oxide.Plugins
         {
             if (boss.IsValid())
             {
-                _boss.Remove(boss.net.ID);
+                _boss.Remove(boss.net.ID.Value);
             }
         }
 
@@ -1305,7 +1495,7 @@ namespace Oxide.Plugins
         {
             if (heli.IsValid())
             {
-                _personal.Add(heli.net.ID);
+                _personal.Add(heli.net.ID.Value);
             }
         }
 
@@ -1313,7 +1503,7 @@ namespace Oxide.Plugins
         {
             if (apc.IsValid())
             {
-                _personal.Add(apc.net.ID);
+                _personal.Add(apc.net.ID.Value);
             }
         }
 
@@ -1328,9 +1518,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            var item = tw.GetItem();
-
-            if (item != null && !config.SupplyDrop.Skins.Contains(item.skin))
+            if (tw.GetItem() is Item item && !config.SupplyDrop.Skins.Contains(item.skin))
             {
                 return;
             }
@@ -1374,7 +1562,8 @@ namespace Oxide.Plugins
             Interface.CallHook("OnModifiedSupplySignal", player, ss, tw);
         }
 
-        private List<ulong> thrown = new List<ulong>();
+        private List<ulong> crateLock = new();
+        private List<ulong> thrown = new();
 
         private void Explode(SupplySignal ss, ulong userid, Vector3 position, string resourcePath, BasePlayer player)
         {
@@ -1391,22 +1580,40 @@ namespace Oxide.Plugins
                 else ss.FinishUp();
             }
 
-            var drop = GameManager.server.CreateEntity(StringPool.Get(3632568684), position) as SupplyDrop;
-
-            drop.OwnerID = userid;
-            drop.skinID = supplyDropSkinID;
-            drop.Spawn();
-            drop.Invoke(() => drop.OwnerID = userid, 1f);
-
-            if (config.SupplyDrop.LockTime > 0)
+            if (GameManager.server.CreateEntity(StringPool.Get(3632568684), position) is SupplyDrop drop)
             {
-                OnSupplyDropLanded(drop);
+                drop.OwnerID = userid;
+                drop.skinID = supplyDropSkinID;
+                drop.Spawn();
+                drop.Invoke(() => drop.OwnerID = userid, 1f);
+
+                if (config.SupplyDrop.LockTime > 0)
+                {
+                    OnSupplyDropLanded(drop);
+                }
+                else DelayedDestroySupplyDrop(drop);
+            }
+        }
+
+        private void DelayedDestroySupplyDrop(SupplyDrop drop)
+        {
+            if (config.SupplyDrop.DestroyTime > 0f)
+            {
+                drop.Invoke(() =>
+                {
+                    if (!drop.IsDestroyed)
+                    {
+                        drop.Kill();
+                    }
+                }, config.SupplyDrop.DestroyTime);
             }
         }
 
         private void OnExcavatorSuppliesRequested(ExcavatorSignalComputer computer, BasePlayer player, CargoPlane plane)
         {
-            float y = plane.transform.position.y / Core.Random.Range(2, 4); // Change Y, fast drop
+            float y = plane.transform.position.y;
+
+            if (config.SupplyDrop.LowDrop) y /= Core.Random.Range(2, 4); // Change Y, fast drop
 
             plane.transform.position.Set(plane.transform.position.x, y, plane.transform.position.z);
             plane.startPos.Set(plane.startPos.x, y, plane.startPos.z);
@@ -1414,6 +1621,27 @@ namespace Oxide.Plugins
             plane.secondsToTake = Vector3.Distance(plane.startPos, plane.endPos) / Mathf.Clamp(config.SupplyDrop.Speed, 40f, World.Size);
             plane.OwnerID = player.userID;
             plane.skinID = supplyDropSkinID;
+
+            if (config.SupplyDrop.DistanceFromSignal > -1)
+            {
+                float j = config.SupplyDrop.DistanceFromSignal;
+                plane.InitDropPosition(computer.transform.position + new Vector3(UnityEngine.Random.Range(-j, j), 0f, UnityEngine.Random.Range(-j, j)));
+            }
+
+            cargoPlanes.Add(plane);
+        }
+
+        private void OnRandomRaidWin(SupplyDrop drop, List<ulong> playerID)
+        {
+            if (drop)
+            {
+                if (playerID.Count > 0 && !drop.OwnerID.IsSteamId())
+                {
+                    drop.OwnerID = playerID[0];
+                }
+                drop.skinID = supplyDropSkinID;
+                OnSupplyDropLanded(drop);
+            }
         }
 
         private void OnCargoPlaneSignaled(CargoPlane plane, SupplySignal ss)
@@ -1423,7 +1651,9 @@ namespace Oxide.Plugins
                 return;
             }
 
-            float y = plane.transform.position.y / Core.Random.Range(2, 4); // Change Y, fast drop
+            float y = plane.transform.position.y;
+            
+            if (config.SupplyDrop.LowDrop) y /= Core.Random.Range(2, 4); // Change Y, fast drop
 
             plane.transform.position.Set(plane.transform.position.x, y, plane.transform.position.z);
             plane.startPos.Set(plane.startPos.x, y, plane.startPos.z);
@@ -1431,6 +1661,12 @@ namespace Oxide.Plugins
             plane.secondsToTake = Vector3.Distance(plane.startPos, plane.endPos) / Mathf.Clamp(config.SupplyDrop.Speed, 40f, World.Size);
             plane.OwnerID = ss.OwnerID;
             plane.skinID = supplyDropSkinID;
+
+            if (config.SupplyDrop.DistanceFromSignal > -1)
+            {
+                float j = config.SupplyDrop.DistanceFromSignal;
+                plane.InitDropPosition(ss.transform.position + new Vector3(UnityEngine.Random.Range(-j, j), 0f, UnityEngine.Random.Range(-j, j)));
+            }
 
             if (config.SupplyDrop.Smoke > -1)
             {
@@ -1448,6 +1684,8 @@ namespace Oxide.Plugins
                 });
             }
 
+            cargoPlanes.Add(plane);
+
             Interface.CallHook("OnModifiedCargoPlaneSignaled", plane, ss);
         }
 
@@ -1458,12 +1696,13 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Rigidbody rb;
-            if (drop.TryGetComponent(out rb))
+            if (drop.TryGetComponent(out Rigidbody rb))
             {
                 rb.drag = Mathf.Clamp(config.SupplyDrop.Drag, 0.1f, 3f);
                 rb.collisionDetectionMode = CollisionDetectionMode.Continuous;
             }
+
+            DelayedDestroySupplyDrop(drop);
 
             drop.OwnerID = plane.OwnerID;
             drop.skinID = supplyDropSkinID;
@@ -1478,9 +1717,35 @@ namespace Oxide.Plugins
                 return;
             }
 
+            DelayedDestroySupplyDrop(drop);
+
             drop.Invoke(() => drop.OwnerID = 0, config.SupplyDrop.LockTime);
 
             Interface.CallHook("OnModifiedSupplyDropLanded", drop);
+        }
+
+        private List<CargoPlane> cargoPlanes = new();
+
+        private void OnEntitySpawned(SupplyDrop drop)
+        {
+            if (drop.skinID == supplyDropSkinID)
+            {
+                DelayedDestroySupplyDrop(drop);
+            }
+            else OnHelpfulSupplyDropped(drop);
+        }
+
+        private void OnHelpfulSupplyDropped(SupplyDrop drop)
+        {
+            if (!config.SupplyDrop.HelpfulSupply || HelpfulSupply == null) return;
+            if (drop == null || drop.IsDestroyed) return;
+            if (BasePlayer.allPlayerList.Any(x => x.OwnerID == drop.OwnerID)) return;
+            cargoPlanes.RemoveAll(x => x == null || x.IsDestroyed || !x.OwnerID.IsSteamId());
+            if (cargoPlanes.Count == 0) return;
+            cargoPlanes.Sort((x, y) => x.Distance(drop).CompareTo(y.Distance(drop)));
+            drop.OwnerID = cargoPlanes[0].OwnerID;
+            drop.skinID = cargoPlanes[0].skinID;
+            DelayedDestroySupplyDrop(drop);
         }
 
         #endregion SupplyDrops
@@ -1489,7 +1754,7 @@ namespace Oxide.Plugins
         {
             NextTick(() =>
             {
-                if (crate != null && crate.OwnerID == 0)
+                if (crate != null && crate.OwnerID == 0 && CanLockHackableCrate(player, crate))
                 {
                     crate.OwnerID = player.userID;
 
@@ -1498,11 +1763,23 @@ namespace Oxide.Plugins
             });
         }
 
+        private bool CanLockHackableCrate(BasePlayer player, HackableLockedCrate crate)
+        {
+            if (!config.Hackable.Harbor && harbors.Exists(mi => IsInBounds(mi, crate.ServerPosition)))
+            {
+                return false;
+            }
+            return Interface.CallHook("OnLootLockedEntity", player, crate) == null;
+        }
+
         private void CanHackCrate(BasePlayer player, HackableLockedCrate crate)
         {
-            crate.OwnerID = player.userID;
+            if (CanLockHackableCrate(player, crate))
+            {
+                crate.OwnerID = player.userID;
 
-            SetupHackableCrate(player, crate);
+                SetupHackableCrate(player, crate);
+            }
         }
 
         #endregion Hooks
@@ -1528,31 +1805,69 @@ namespace Oxide.Plugins
         {
             float hackSeconds = 0f;
 
-            foreach (var entry in config.Hackable.Permissions)
+            if (config.Hackable.Seconds && config.Hackable.Permissions.Count > 0)
             {
-                if (permission.UserHasPermission(owner.UserIDString, entry.Permission))
+                foreach (var entry in config.Hackable.Permissions)
                 {
-                    if (entry.Value < HackableLockedCrate.requiredHackSeconds - hackSeconds)
+                    if (permission.UserHasPermission(owner.UserIDString, entry.Permission))
                     {
-                        hackSeconds = HackableLockedCrate.requiredHackSeconds - entry.Value;
+                        if (entry.Value < HackableLockedCrate.requiredHackSeconds - hackSeconds)
+                        {
+                            hackSeconds = HackableLockedCrate.requiredHackSeconds - entry.Value;
+                        }
                     }
                 }
+
+                crate.hackSeconds = hackSeconds;
             }
 
-            crate.hackSeconds = hackSeconds;
+            var val = crate.net.ID.Value;
+            var userid = owner.userID;
+            var username = owner.displayName;
+            var grid = PositionToGrid(owner.transform.position);
+
+            _locked[val] = crate.OwnerID;
 
             if (config.Hackable.LockTime > 0f)
             {
                 crate.Invoke(() =>
                 {
                     crate.OwnerID = 0;
+                    _locked.Remove(val);
+
+                    if (config.Hackable.NotifyUnlocked && !crateLock.Contains(userid) && crate.inventory != null && !crate.inventory.IsEmpty())
+                    {
+                        if (config.Hackable.NotifyCooldown > 0)
+                        {
+                            crateLock.Add(userid);
+                            timer.In(config.Hackable.NotifyCooldown, () => crateLock.Remove(userid));
+                        }
+                        foreach (var target in BasePlayer.activePlayerList)
+                        {
+                            CreateMessage(target, "CrateUnlocked", grid, username);
+                        }
+                    }
                 }, config.Hackable.LockTime + (HackableLockedCrate.requiredHackSeconds - hackSeconds));
+            }
+
+
+            if (config.Hackable.NotifyLocked && !crateLock.Contains(userid))
+            {
+                if (config.Hackable.NotifyCooldown > 0)
+                {
+                    crateLock.Add(userid);
+                    timer.In(config.Hackable.NotifyCooldown, () => crateLock.Remove(userid));
+                }
+                foreach (var target in BasePlayer.activePlayerList)
+                {
+                    CreateMessage(target, "CrateLocked", username, grid);
+                }
             }
         }
 
         private void CancelDamage(HitInfo hitInfo)
         {
-            hitInfo.damageTypes = new DamageTypeList();
+            hitInfo.damageTypes = new();
             hitInfo.DoHitEffects = false;
             hitInfo.DidHit = false;
         }
@@ -1572,9 +1887,19 @@ namespace Oxide.Plugins
             return true;
         }
 
-        public bool HasLockout(BasePlayer player, DamageEntryType damageEntryType)
+        public bool HasLockout(BasePlayer player, DamageEntryType damageEntryType, ulong skinid)
         {
+            if (config.Lockout.Exceptions.Contains(skinid))
+            {
+                return false;
+            }
+
             if (damageEntryType == DamageEntryType.Bradley && config.Lockout.Bradley <= 0)
+            {
+                return false;
+            }
+
+            if (damageEntryType == DamageEntryType.Heli && config.Lockout.Heli <= 0)
             {
                 return false;
             }
@@ -1584,8 +1909,7 @@ namespace Oxide.Plugins
                 return false;
             }
 
-            Lockout lo;
-            if (data.Lockouts.TryGetValue(player.UserIDString, out lo))
+            if (data.Lockouts.TryGetValue(player.UserIDString, out var lo))
             {
                 double time = UI.GetLockoutTime(damageEntryType, lo, player.UserIDString);
 
@@ -1593,13 +1917,11 @@ namespace Oxide.Plugins
                 {
                     if (CanMessage(player))
                     {
-                        CreateMessage(player, "LockedOutBradley", FormatTime(time));
+                        CreateMessage(player, damageEntryType == DamageEntryType.Bradley ? "LockedOutBradley" : "LockedOutHeli", FormatTime(time));
                     }
 
                     return true;
                 }
-
-                data.Lockouts.Remove(player.UserIDString);
             }
 
             return false;
@@ -1622,12 +1944,31 @@ namespace Oxide.Plugins
         {
             foreach (var lo in data.Lockouts.ToList())
             {
-                if (lo.Value.Bradley - Epoch.Current > config.Lockout.Bradley)
-                {
-                    double time = UI.GetLockoutTime(damageEntryType);
+                double time = UI.GetLockoutTime(damageEntryType);
 
+                if (time <= 0f)
+                {
+                    continue;
+                }
+
+                bool update = false;
+
+                if (damageEntryType == DamageEntryType.Bradley && lo.Value.Bradley - Epoch.Current > config.Lockout.Bradley)
+                {
                     lo.Value.Bradley = Epoch.Current + time;
 
+                    update = true;
+                }
+
+                if (damageEntryType == DamageEntryType.Heli && lo.Value.Heli - Epoch.Current > config.Lockout.Heli)
+                {
+                    lo.Value.Heli = Epoch.Current + time;
+
+                    update = true;
+                }
+
+                if (update)
+                {
                     var player = BasePlayer.Find(lo.Key);
 
                     if (player == null) continue;
@@ -1637,9 +1978,14 @@ namespace Oxide.Plugins
             }
         }
 
-        public void TrySetLockout(string playerId, BasePlayer player, DamageEntryType damageEntryType)
+        public void TrySetLockout(string userid, BasePlayer player, DamageEntryType damageEntryType, ulong skinID)
         {
-            if (permission.UserHasPermission(playerId, bypassLockoutsPerm))
+            if (config.Lockout.Exceptions.Contains(skinID))
+            {
+                return;
+            }
+
+            if (permission.UserHasPermission(userid, bypassLockoutsPerm))
             {
                 return;
             }
@@ -1651,10 +1997,9 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Lockout lo;
-            if (!data.Lockouts.TryGetValue(playerId, out lo))
+            if (!data.Lockouts.TryGetValue(userid, out var lo))
             {
-                data.Lockouts[playerId] = lo = new Lockout();
+                data.Lockouts[userid] = lo = new();
             }
 
             switch (damageEntryType)
@@ -1667,6 +2012,14 @@ namespace Oxide.Plugins
                         }
                         break;
                     }
+                case DamageEntryType.Heli:
+                    {
+                        if (lo.Heli <= 0)
+                        {
+                            lo.Heli = Epoch.Current + time;
+                        }
+                        break;
+                    }
             }
 
             if (lo.Any())
@@ -1675,36 +2028,33 @@ namespace Oxide.Plugins
             }
         }
 
-        private void LockoutBradleyLooters(List<ulong> looters, Vector3 position)
+        private void LockoutLooters(List<ulong> looters, Vector3 position, DamageEntryType damageEntryType, ulong skinID)
         {
             if (looters.Count == 0)
             {
                 return;
             }
 
-            var members = new List<ulong>(looters);
+            List<ulong> members = new(looters);
+            List<string> usernames = new();
 
             foreach (ulong looterId in looters)
             {
                 var looter = RelationshipManager.FindByID(looterId);
 
-                TrySetLockout(looterId.ToString(), looter, DamageEntryType.Bradley);
-                LockoutTeam(members, looterId, DamageEntryType.Bradley);
-                LockoutClan(members, looterId, DamageEntryType.Bradley);
+                if (looter) usernames.Add(looter.displayName);
+
+                TrySetLockout(looterId.ToString(), looter, damageEntryType, skinID);
+                LockoutTeam(members, looterId, damageEntryType, skinID);
+                LockoutClan(members, looterId, damageEntryType, skinID);
             }
 
-            SendDiscordMessage(members, position, DamageEntryType.Bradley);
+            SendDiscordMessage(members, usernames, position, damageEntryType);
         }
 
-        private void LockoutTeam(List<ulong> members, ulong looterId, DamageEntryType damageEntryType)
+        private void LockoutTeam(List<ulong> members, ulong looterId, DamageEntryType damageEntryType, ulong skinID)
         {
-            if (!config.Lockout.Team)
-            {
-                return;
-            }
-
-            RelationshipManager.PlayerTeam team;
-            if (!RelationshipManager.ServerInstance.playerToTeam.TryGetValue(looterId, out team))
+            if (!config.Lockout.Team || !RelationshipManager.ServerInstance.playerToTeam.TryGetValue(looterId, out var team))
             {
                 return;
             }
@@ -1718,45 +2068,25 @@ namespace Oxide.Plugins
 
                 var member = RelationshipManager.FindByID(memberId);
 
-                if (config.Lockout.Time > 0 && member?.secondsSleeping > config.Lockout.Time * 60f)
+                if (config.Lockout.Time > 0 && member != null && member.secondsSleeping > config.Lockout.Time * 60f)
                 {
                     continue;
                 }
 
-                TrySetLockout(memberId.ToString(), member, damageEntryType);
+                TrySetLockout(memberId.ToString(), member, damageEntryType, skinID);
 
                 members.Add(memberId);
             }
         }
 
-        private void LockoutClan(List<ulong> members, ulong looterId, DamageEntryType damageEntryType)
+        private void LockoutClan(List<ulong> members, ulong looterId, DamageEntryType damageEntryType, ulong skinID)
         {
-            if (!config.Lockout.Clan)
+            if (!config.Lockout.Clan || Instance?.Clans?.Call("GetClanMembers", looterId) is not List<string> clan)
             {
                 return;
             }
 
-            var tag = Clans?.Call("GetClanOf", looterId) as string;
-
-            if (string.IsNullOrEmpty(tag))
-            {
-                return;
-            }
-
-            var clan = Clans?.Call("GetClan", tag) as JObject;
-
-            if (clan == null)
-            {
-                return;
-            }
-
-            JToken jToken;
-            if (!clan.TryGetValue("members", out jToken))
-            {
-                return;
-            }
-
-            foreach (ulong memberId in jToken)
+            foreach (ulong memberId in clan.Select(ulong.Parse))
             {
                 if (members.Contains(memberId))
                 {
@@ -1765,27 +2095,36 @@ namespace Oxide.Plugins
 
                 var member = RelationshipManager.FindByID(memberId);
 
-                if (config.Lockout.Time > 0 && member?.secondsSleeping > config.Lockout.Time * 60f)
+                if (config.Lockout.Time > 0 && member != null && member.secondsSleeping > config.Lockout.Time * 60f)
                 {
                     continue;
                 }
 
-                TrySetLockout(memberId.ToString(), member, damageEntryType);
+                TrySetLockout(memberId.ToString(), member, damageEntryType, skinID);
 
                 members.Add(memberId);
             }
         }
 
-        private object HandleTeam(RelationshipManager.PlayerTeam team, ulong targetId)
+        private object HandleTeam(RelationshipManager.PlayerTeam team, ulong userid)
         {
-            foreach (var entry in _apcAttackers)
+            List<(string key, Dictionary<ulong, List<DamageKey>> dict)> attackers = new()
             {
-                foreach (var info in entry.Value)
+                ("CannotLeaveBradley", _apcAttackers),
+                ("CannotLeaveHeli", _heliAttackers)
+            };
+
+            foreach (var (key, dict) in attackers)
+            {
+                foreach (var list in dict.Values)
                 {
-                    if (info.id == targetId)
+                    foreach (var info in list)
                     {
-                        CreateMessage(info.attacker, "CannotLeaveBradley");
-                        return true;
+                        if (info.userid == userid)
+                        {
+                            CreateMessage(info.attacker, key);
+                            return true;
+                        }
                     }
                 }
             }
@@ -1793,30 +2132,28 @@ namespace Oxide.Plugins
             return null;
         }
 
-        private bool IsDefended(PatrolHelicopter heli) => heli.IsValid() && (data.Lock.ContainsKey(heli.net.ID) || data.Damage.ContainsKey(heli.net.ID));
+        private bool IsDefended(PatrolHelicopter heli) => heli.IsValid() && (data.Lock.ContainsKey(heli.net.ID.Value) || data.Damage.ContainsKey(heli.net.ID.Value));
 
-        private bool IsDefended(BaseCombatEntity victim) => victim.IsValid() && (_locked.ContainsKey(victim.net.ID) || data.Lock.ContainsKey(victim.net.ID));
+        private bool IsDefended(BaseCombatEntity victim) => victim.IsValid() && (_locked.ContainsKey(victim.net.ID.Value) || data.Lock.ContainsKey(victim.net.ID.Value));
 
         private void DoLockoutRemoves()
         {
-            var keys = new List<string>();
-
-            foreach (var lockout in data.Lockouts)
+            foreach (var (userid, lo) in data.Lockouts.ToList())
             {
-                if (lockout.Value.Bradley - Epoch.Current <= 0)
+                if (lo.Bradley - Epoch.Current <= 0)
                 {
-                    lockout.Value.Bradley = 0;
+                    lo.Bradley = 0;
                 }
 
-                if (!lockout.Value.Any())
+                if (lo.Heli - Epoch.Current <= 0)
                 {
-                    keys.Add(lockout.Key);
+                    lo.Heli = 0;
                 }
-            }
 
-            foreach (string key in keys)
-            {
-                data.Lockouts.Remove(key);
+                if (!lo.Any())
+                {
+                    data.Lockouts.Remove(userid);
+                }
             }
         }
 
@@ -1827,6 +2164,7 @@ namespace Oxide.Plugins
             Unsubscribe(nameof(OnGuardedCrateEventEnded));
             Unsubscribe(nameof(CanHackCrate));
             Unsubscribe(nameof(OnPlayerSleepEnded));
+            Unsubscribe(nameof(OnEntitySpawned));
             Unsubscribe(nameof(OnSupplyDropLanded));
             Unsubscribe(nameof(OnEntityDeath));
             Unsubscribe(nameof(OnEntityKill));
@@ -1841,6 +2179,7 @@ namespace Oxide.Plugins
             Unsubscribe(nameof(OnPersonalApcSpawned));
             Unsubscribe(nameof(OnPersonalHeliSpawned));
             Unsubscribe(nameof(CanBradleyTakeDamage));
+            Unsubscribe(nameof(OnRandomRaidWin));
         }
 
         private void SaveData()
@@ -1851,15 +2190,11 @@ namespace Oxide.Plugins
 
         private void LoadData()
         {
-            try
-            {
-                data = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name);
-            }
-            catch { }
+            try { data = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name); } catch { }
 
             if (data == null)
             {
-                data = new StoredData();
+                data = new();
                 SaveData();
             }
 
@@ -1876,6 +2211,10 @@ namespace Oxide.Plugins
             permission.RegisterPermission(bypassLootPerm, this);
             permission.RegisterPermission(bypassDamagePerm, this);
             permission.RegisterPermission(bypassLockoutsPerm, this);
+            permission.RegisterPermission("lootdefender.bypassnpclock", this);
+            permission.RegisterPermission("lootdefender.bypasshelilock", this);
+            permission.RegisterPermission("lootdefender.bypassbradleylock", this);
+
         }
 
         private bool IsAlly(ulong playerId, ulong targetId)
@@ -1885,8 +2224,7 @@ namespace Oxide.Plugins
                 return true;
             }
 
-            RelationshipManager.PlayerTeam team;
-            if (RelationshipManager.ServerInstance.playerToTeam.TryGetValue(playerId, out team) && team.members.Contains(targetId))
+            if (RelationshipManager.ServerInstance.playerToTeam.TryGetValue(playerId, out var team) && team.members.Contains(targetId))
             {
                 return true;
             }
@@ -1904,16 +2242,11 @@ namespace Oxide.Plugins
             return false;
         }
 
-        private static List<T> FindEntitiesOfType<T>(Vector3 a, float n, int m = -1) where T : BaseNetworkable
+        private static List<T> FindEntitiesOfType<T>(Vector3 a, float n, int m = -1) where T : BaseEntity
         {
-            int hits = Physics.OverlapSphereNonAlloc(a, n, Vis.colBuffer, m, QueryTriggerInteraction.Collide);
-            List<T> entities = new List<T>();
-            for (int i = 0; i < hits; i++)
-            {
-                var entity = Vis.colBuffer[i]?.ToBaseEntity();
-                if (entity is T) entities.Add(entity as T);
-                Vis.colBuffer[i] = null;
-            }
+            List<T> entities = Pool.GetList<T>();
+            Vis.Entities(a, n, entities, m, QueryTriggerInteraction.Collide);
+            entities.RemoveAll(x => !x || x.IsDestroyed);
             return entities;
         }
 
@@ -1934,16 +2267,13 @@ namespace Oxide.Plugins
 
         private void RemoveFireFromCrates(Vector3 position, DamageEntryType damageEntryType)
         {
-            foreach (var e in FindEntitiesOfType<BaseEntity>(position, 25f).ToList())
+            var entities = FindEntitiesOfType<BaseEntity>(position, 25f);
+            foreach (var e in entities)
             {
                 if (CanRemoveFire(damageEntryType))
                 {
-                    if (e is LockedByEntCrate)
+                    if (e is LockedByEntCrate crate)
                     {
-                        var crate = e as LockedByEntCrate;
-
-                        if (crate == null) continue;
-
                         var lockingEnt = crate.lockingEnt;
 
                         if (lockingEnt == null) continue;
@@ -1955,52 +2285,61 @@ namespace Oxide.Plugins
                             entity.Kill();
                         }
                     }
-                    else if (e is FireBall)
+                    else if (e is FireBall fireball)
                     {
-                        var fireball = e as FireBall;
-
                         fireball.Extinguish();
                     }
                 }
 
-                if (e is HelicopterDebris)
+                if (e is HelicopterDebris debris)
                 {
                     float num = damageEntryType == DamageEntryType.Heli ? config.Helicopter.TooHotUntil : config.Bradley.TooHotUntil;
-                    var debris = e as HelicopterDebris;
 
-                    debris.tooHotUntil = Time.realtimeSinceStartup + num;
+                    if (num > -1)
+                    {
+                        debris.tooHotUntil = Time.realtimeSinceStartup + num;
+                    }
                 }
             }
+            Pool.FreeList(ref entities);
         }
 
         private void LockInRadius<T>(Vector3 position, LockInfo lockInfo, DamageEntryType damageEntryType) where T : BaseEntity
         {
-            foreach (var entity in FindEntitiesOfType<T>(position, damageEntryType == DamageEntryType.Heli ? 50f : 20f))
+            var entities = FindEntitiesOfType<T>(position, damageEntryType == DamageEntryType.Heli ? 50f : 20f);
+            foreach (var entity in entities)
             {
+                if (data.Lock.ContainsKey(entity.net.ID.Value))
+                {
+                    continue;
+                }
+
                 ulong ownerid = lockInfo.damageInfo.OwnerID;
                 entity.OwnerID = ownerid;
-                data.Lock[entity.net.ID] = lockInfo;
+                data.Lock[entity.net.ID.Value] = lockInfo;
 
                 float time = GetLockTime(damageEntryType);
 
                 entity.Invoke(() => entity.OwnerID = ownerid, 1f);
 
-                if (time > 0)
+                if (time > 0f)
                 {
                     entity.Invoke(() => entity.OwnerID = 0, time);
                 }
             }
+            Pool.FreeList(ref entities);
         }
 
-        private void LockInRadius(Vector3 position, DamageInfo damageInfo, ulong playerSteamID)
+        private void LockInRadius(Vector3 position, ulong damageKey, DamageInfo damageInfo, ulong playerSteamID)
         {
-            foreach (var corpse in FindEntitiesOfType<NPCPlayerCorpse>(position, 3f))
+            var corpses = FindEntitiesOfType<LootableCorpse>(position, 3f);
+            foreach (var corpse in corpses)
             {
-                if (corpse.IsValid() && corpse.playerSteamID == playerSteamID && !data.Lock.ContainsKey(corpse.net.ID))
+                if (corpse.IsValid() && corpse.playerSteamID == playerSteamID && !data.Lock.ContainsKey(corpse.net.ID.Value))
                 {
                     if (config.Npc.LockTime > 0f)
                     {
-                        var uid = corpse.net.ID;
+                        var uid = corpse.net.ID.Value;
 
                         timer.Once(config.Npc.LockTime, () => data.Lock.Remove(uid));
                         corpse.Invoke(() => corpse.OwnerID = 0, config.Npc.LockTime);
@@ -2009,20 +2348,23 @@ namespace Oxide.Plugins
                     ulong ownerid = damageInfo.OwnerID;
                     corpse.OwnerID = ownerid;
                     corpse.Invoke(() => corpse.OwnerID = ownerid, 1f);
-                    data.Lock[corpse.net.ID] = new LockInfo(damageInfo, config.Npc.LockTime);
+                    data.Lock[corpse.net.ID.Value] = new(damageInfo, config.Npc.LockTime);
+                    timer.Once(3f, () => data.Damage.Remove(damageKey));
                 }
             }
+            Pool.FreeList(ref corpses);
         }
 
         private void LockInRadius(Vector3 position, LockInfo lockInfo, ulong playerSteamID)
         {
-            foreach (var container in FindEntitiesOfType<DroppedItemContainer>(position, 1f))
+            var containers = FindEntitiesOfType<DroppedItemContainer>(position, 3f);
+            foreach (var container in containers)
             {
-                if (container.IsValid() && container.playerSteamID == playerSteamID && !data.Lock.ContainsKey(container.net.ID))
+                if (container.IsValid() && container.playerSteamID == playerSteamID && !data.Lock.ContainsKey(container.net.ID.Value))
                 {
                     if (config.Npc.LockTime > 0f)
                     {
-                        var uid = container.net.ID;
+                        var uid = container.net.ID.Value;
 
                         timer.Once(config.Npc.LockTime, () => data.Lock.Remove(uid));
                         container.Invoke(() => container.OwnerID = 0, config.Npc.LockTime);
@@ -2031,9 +2373,10 @@ namespace Oxide.Plugins
                     ulong ownerid = lockInfo.damageInfo.OwnerID;
                     container.OwnerID = ownerid;
                     container.Invoke(() => container.OwnerID = ownerid, 1f);
-                    data.Lock[container.net.ID] = lockInfo;
+                    data.Lock[container.net.ID.Value] = lockInfo;
                 }
             }
+            Pool.FreeList(ref containers);
         }
 
         private static int GetLockTime(DamageEntryType damageEntryType)
@@ -2041,12 +2384,6 @@ namespace Oxide.Plugins
             int time = damageEntryType == DamageEntryType.Bradley ? config.Bradley.LockTime : damageEntryType == DamageEntryType.Heli ? config.Helicopter.LockTime : config.Npc.LockTime;
 
             return time > 0 ? time : int.MaxValue;
-        }
-
-        private void CommandTest(IPlayer user, string command, string[] args)
-        {
-            user.Reply($"data.DamageInfos.Count: {data.Damage.Count}");
-            user.Reply($"data.LockInfos.Count: {data.Lock.Count}");
         }
 
         #endregion Helpers
@@ -2116,6 +2453,7 @@ namespace Oxide.Plugins
                 if (player.IsValid() && player.IsConnected && Lockouts.Contains(player))
                 {
                     CuiHelper.DestroyUi(player, BradleyPanelName);
+                    CuiHelper.DestroyUi(player, HeliPanelName);
                     Lockouts.Remove(player);
                     DestroyLockoutUpdate(player);
                 }
@@ -2128,6 +2466,7 @@ namespace Oxide.Plugins
                     if (player.IsValid() && player.IsConnected && Lockouts.Contains(player))
                     {
                         CuiHelper.DestroyUi(player, BradleyPanelName);
+                        CuiHelper.DestroyUi(player, HeliPanelName);
                         DestroyLockoutUpdate(player);
                     }
                 }
@@ -2135,11 +2474,11 @@ namespace Oxide.Plugins
                 Lockouts.Clear();
             }
 
-            private static void Create(BasePlayer player, string panelName, string text, string color, string panelColor, string aMin, string aMax)
+            private static void Create(BasePlayer player, string panelName, string text, int fontSize, string color, string panelColor, string aMin, string aMax)
             {
                 var element = CreateElementContainer(panelName, panelColor, aMin, aMax, false, "Hud");
 
-                CreateLabel(ref element, panelName, Color(color), text, config.UI.Bradley.FontSize, "0 0", "1 1");
+                CreateLabel(ref element, panelName, Color(color), text, fontSize, "0 0", "1 1");
                 CuiHelper.AddUi(player, element);
 
                 if (!Lockouts.Contains(player))
@@ -2158,51 +2497,58 @@ namespace Oxide.Plugins
                 }
 
                 string bradley = Math.Floor(TimeSpan.FromSeconds(bradleyTime).TotalMinutes).ToString();
-                string bradleyBackgroundColor = Color(config.UI.Bradley.BradleyBackgroundColor, config.UI.Bradley.Alpha);
+                string bradleyBackgroundColor = Color(config.UI.Bradley.BackgroundColor, config.UI.Bradley.Alpha);
 
-                Create(player, BradleyPanelName, _("Time", player.UserIDString, bradley), config.UI.Bradley.BradleyTextColor, bradleyBackgroundColor, min, max);
+                Create(player, BradleyPanelName, _("Time", player.UserIDString, bradley), config.UI.Bradley.FontSize, config.UI.Bradley.TextColor, bradleyBackgroundColor, min, max);
 
-                config.UI.Bradley.BradleyMin = min;
-                config.UI.Bradley.BradleyMax = max;
+                config.UI.Bradley.AnchorMin = min;
+                config.UI.Bradley.AnchorMax = max;
                 Instance.SaveConfig();
 
                 player.Invoke(() => DestroyLockoutUI(player), 5f);
                 return true;
             }
 
-            public static bool ShowLockouts(BasePlayer player)
+            public static void ShowLockouts(BasePlayer player)
             {
-                if (!config.UI.Bradley.Enabled)
-                {
-                    return false;
-                }
-
                 if (Instance.HasPermission(player, bypassLockoutsPerm))
                 {
                     data.Lockouts.Remove(player.UserIDString);
-                    return false;
+                    return;
                 }
 
-                Lockout lo;
-                if (!data.Lockouts.TryGetValue(player.UserIDString, out lo))
+                if (!data.Lockouts.TryGetValue(player.UserIDString, out var lo))
                 {
-                    data.Lockouts[player.UserIDString] = lo = new Lockout();
+                    data.Lockouts[player.UserIDString] = lo = new();
                 }
 
-                double bradleyTime = GetLockoutTime(DamageEntryType.Bradley, lo, player.UserIDString);
-
-                if (bradleyTime <= 0)
+                if (config.UI.Bradley.Enabled)
                 {
-                    return false;
+                    double bradleyTime = GetLockoutTime(DamageEntryType.Bradley, lo, player.UserIDString);
+
+                    if (bradleyTime > 0f)
+                    {
+                        string bradley = Math.Floor(TimeSpan.FromSeconds(bradleyTime).TotalMinutes).ToString();
+                        string bradleyBackgroundColor = Color(config.UI.Bradley.BackgroundColor, config.UI.Bradley.Alpha);
+
+                        Create(player, BradleyPanelName, _("Time", player.UserIDString, bradley), config.UI.Bradley.FontSize, config.UI.Bradley.TextColor, bradleyBackgroundColor, config.UI.Bradley.AnchorMin, config.UI.Bradley.AnchorMax);
+                        SetLockoutUpdate(player);
+                    }
                 }
 
-                string bradley = Math.Floor(TimeSpan.FromSeconds(bradleyTime).TotalMinutes).ToString();
-                string bradleyBackgroundColor = Color(config.UI.Bradley.BradleyBackgroundColor, config.UI.Bradley.Alpha);
+                if (config.UI.Heli.Enabled)
+                {
+                    double heliTime = GetLockoutTime(DamageEntryType.Heli, lo, player.UserIDString);
 
-                Create(player, BradleyPanelName, _("Time", player.UserIDString, bradley), config.UI.Bradley.BradleyTextColor, bradleyBackgroundColor, config.UI.Bradley.BradleyMin, config.UI.Bradley.BradleyMax);
-                SetLockoutUpdate(player);
+                    if (heliTime > 0)
+                    {
+                        string heli = Math.Floor(TimeSpan.FromSeconds(heliTime).TotalMinutes).ToString();
+                        string heliBackgroundColor = Color(config.UI.Heli.BackgroundColor, config.UI.Heli.Alpha);
 
-                return true;
+                        Create(player, HeliPanelName, _("Heli Time", player.UserIDString, heli), config.UI.Heli.FontSize, config.UI.Heli.TextColor, heliBackgroundColor, config.UI.Heli.AnchorMin, config.UI.Heli.AnchorMax);
+                        SetLockoutUpdate(player);
+                    }
+                }
             }
 
             public static double GetLockoutTime(DamageEntryType damageEntryType)
@@ -2212,6 +2558,10 @@ namespace Oxide.Plugins
                     case DamageEntryType.Bradley:
                         {
                             return config.Lockout.Bradley * 60;
+                        }
+                    case DamageEntryType.Heli:
+                        {
+                            return config.Lockout.Heli * 60;
                         }
                 }
 
@@ -2229,6 +2579,15 @@ namespace Oxide.Plugins
                             if ((time = lo.Bradley) <= 0 || (time -= Epoch.Current) <= 0)
                             {
                                 lo.Bradley = 0;
+                            }
+
+                            break;
+                        }
+                    case DamageEntryType.Heli:
+                        {
+                            if ((time = lo.Heli) <= 0 || (time -= Epoch.Current) <= 0)
+                            {
+                                lo.Heli = 0;
                             }
 
                             break;
@@ -2254,11 +2613,6 @@ namespace Oxide.Plugins
 
                 DestroyLockoutUI(player);
 
-                if (!config.UI.Bradley.Enabled)
-                {
-                    return;
-                }
-
                 var uii = GetSettings(player.UserIDString);
 
                 if (!uii.Enabled || !uii.Lockouts)
@@ -2271,10 +2625,9 @@ namespace Oxide.Plugins
 
             private static void SetLockoutUpdate(BasePlayer player)
             {
-                Timers timers;
-                if (!InvokeTimers.TryGetValue(player.userID, out timers))
+                if (!InvokeTimers.TryGetValue(player.userID, out var timers))
                 {
-                    InvokeTimers[player.userID] = timers = new Timers();
+                    InvokeTimers[player.userID] = timers = new();
                 }
 
                 if (timers.Lockout == null || timers.Lockout.Destroyed)
@@ -2289,8 +2642,7 @@ namespace Oxide.Plugins
 
             public static void DestroyLockoutUpdate(BasePlayer player)
             {
-                Timers timers;
-                if (!InvokeTimers.TryGetValue(player.userID, out timers))
+                if (!InvokeTimers.TryGetValue(player.userID, out var timers))
                 {
                     return;
                 }
@@ -2305,19 +2657,19 @@ namespace Oxide.Plugins
 
             public static Info GetSettings(string playerId)
             {
-                Info uii;
-                if (!data.UI.TryGetValue(playerId, out uii))
+                if (!data.UI.TryGetValue(playerId, out var uii))
                 {
-                    data.UI[playerId] = uii = new UI.Info();
+                    data.UI[playerId] = uii = new();
                 }
 
                 return uii;
             }
 
             private const string BradleyPanelName = "Lockouts_UI_Bradley";
+            private const string HeliPanelName = "Lockouts_UI_Heli";
 
-            public static List<BasePlayer> Lockouts { get; set; } = new List<BasePlayer>();
-            public static Dictionary<ulong, Timers> InvokeTimers { get; set; } = new Dictionary<ulong, Timers>();
+            public static List<BasePlayer> Lockouts { get; set; } = new();
+            public static Dictionary<ulong, Timers> InvokeTimers { get; set; } = new();
 
             public class Timers
             {
@@ -2333,20 +2685,50 @@ namespace Oxide.Plugins
 
         private void CommandUI(IPlayer user, string command, string[] args)
         {
+            var player = user.Object as BasePlayer;
+            var uii = UI.GetSettings(user.Id);
+
+            uii.Enabled = !uii.Enabled;
+
+            if (!uii.Enabled)
+            {
+                UI.DestroyLockoutUI(player);
+            }
+            else
+            {
+                UI.UpdateLockoutUI(player);
+            }
+        }
+
+        private void CommandLootDefender(IPlayer user, string command, string[] args)
+        {
+            var player = user.Object as BasePlayer;
+
             if (user.IsServer || user.IsAdmin)
             {
                 if (args.Length == 2)
                 {
                     if (args[0] == "setbradleytime")
                     {
-                        double time;
-                        if (double.TryParse(args[1], out time))
+                        if (double.TryParse(args[1], out var time))
                         {
                             config.Lockout.Bradley = time;
                             SaveConfig();
 
                             user.Reply($"Cooldown changed to {time} minutes");
                             ApplyCooldowns(DamageEntryType.Bradley);
+                        }
+                        else user.Reply($"The specified time '{args[1]}' is not a valid number.");
+                    }
+                    if (args[0] == "sethelitime")
+                    {
+                        if (double.TryParse(args[1], out var time))
+                        {
+                            config.Lockout.Heli = time;
+                            SaveConfig();
+
+                            user.Reply($"Cooldown changed to {time} minutes");
+                            ApplyCooldowns(DamageEntryType.Heli);
                         }
                         else user.Reply($"The specified time '{args[1]}' is not a valid number.");
                     }
@@ -2365,29 +2747,53 @@ namespace Oxide.Plugins
                         }
                         else user.Reply("Target not found");
                     }
+                    else if (command == "unlock")
+                    {
+                        foreach (var pair in data.Lock.ToList())
+                        {
+                            if (player.Distance(pair.Value.damageInfo._position) < 25f || pair.Value.CanInteract(player.userID, player))
+                            {
+                                if (pair.Value.damageInfo._entity != null)
+                                {
+                                    pair.Value.damageInfo._entity.OwnerID = 0uL;
+                                    Message(player, $"Unlocked {(pair.Value.damageInfo.damageEntryType == DamageEntryType.Bradley ? "bradley" : pair.Value.damageInfo.damageEntryType == DamageEntryType.NPC ? "npc" : pair.Value.damageInfo.damageEntryType == DamageEntryType.Heli ? "heli" : "corpse")}");
+                                }
+                                data.Lock.Remove(pair.Key);
+                            }
+                        }
+                    }
                 }
-
-                return;
             }
-
-            var uii = UI.GetSettings(user.Id);
-            var player = user.Object as BasePlayer;
 
             if (player.IsAdmin && args.Length == 3)
             {
                 UI.ShowTemporaryLockouts(player, args[1], args[2]);
-                return;
             }
+        }
 
-            uii.Enabled = !uii.Enabled;
+        private void CommandLockouts(IPlayer user, string command, string[] args)
+        {
+            var player = user.Object as BasePlayer;
 
-            if (!uii.Enabled)
+            if (data.Lockouts.TryGetValue(player.UserIDString, out var lo))
             {
-                UI.DestroyLockoutUI(player);
+                double time1 = UI.GetLockoutTime(DamageEntryType.Bradley, lo, player.UserIDString);
+
+                if (time1 > 0f)
+                {
+                    CreateMessage(player, "LockedOutBradley", FormatTime(time1));
+                }
+
+                double time2 = UI.GetLockoutTime(DamageEntryType.Heli, lo, player.UserIDString);
+
+                if (time2 > 0f)
+                {
+                    CreateMessage(player, "LockedOutHeli", FormatTime(time2));
+                }
             }
             else
             {
-                UI.UpdateLockoutUI(player);
+                CreateMessage(player, "NoLockouts");
             }
         }
 
@@ -2407,14 +2813,19 @@ namespace Oxide.Plugins
 
         private static string PositionToGrid(Vector3 position) => PhoneController.PositionToGridCoord(position);
 
-        private void SendDiscordMessage(List<ulong> members, Vector3 position, DamageEntryType damageEntryType)
+        private void SendDiscordMessage(List<ulong> members, List<string> usernames, Vector3 position, DamageEntryType damageEntryType)
         {
+            if (config.DiscordMessages.NotifyConsole)
+            {
+                Puts($"{damageEntryType} killed by {string.Join(", ", usernames)} at {position}");
+            }
+
             if (!CanSendDiscordMessage())
             {
                 return;
             }
 
-            var players = new Dictionary<string, string>();
+            Dictionary<string, string> players = new();
 
             foreach (ulong memberId in members)
             {
@@ -2434,16 +2845,16 @@ namespace Oxide.Plugins
         private void SendDiscordMessage(Dictionary<string, string> members, Vector3 position, string text)
         {
             string grid = $"{PositionToGrid(position)} {position}";
-            var log = new StringBuilder();
+            StringBuilder log = new();
 
             foreach (var member in members)
             {
                 log.AppendLine($"[{DateTime.Now}] {member.Key} {member.Value} @ {grid}): {text}");
             }
 
-            LogToFile("bradleykills", log.ToString(), this);
+            LogToFile("kills", log.ToString(), this);
 
-            var _fields = new List<object>();
+            List<object> _fields = new();
 
             foreach (var member in members)
             {
@@ -2510,12 +2921,12 @@ namespace Oxide.Plugins
         {
             get
             {
-                return new List<HackPermission>
+                return new()
                 {
-                    new HackPermission { Permission = "lootdefender.hackedcrates.regular", Value = 750f },
-                    new HackPermission { Permission = "lootdefender.hackedcrates.elite", Value = 500f },
-                    new HackPermission { Permission = "lootdefender.hackedcrates.legend", Value = 300f },
-                    new HackPermission { Permission = "lootdefender.hackedcrates.vip", Value = 120f },
+                    new() { Permission = "lootdefender.hackedcrates.regular", Value = 750f },
+                    new() { Permission = "lootdefender.hackedcrates.elite", Value = 500f },
+                    new() { Permission = "lootdefender.hackedcrates.legend", Value = 300f },
+                    new() { Permission = "lootdefender.hackedcrates.vip", Value = 120f },
                 };
             }
         }
@@ -2528,17 +2939,32 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Enabled")]
             public bool Enabled { get; set; }
 
+            [JsonProperty(PropertyName = "Permissions Enabled To Set Required Hack Seconds")]
+            public bool Seconds { get; set; } = true;
+
             [JsonProperty(PropertyName = "Lock For X Seconds (0 = Forever)")]
             public int LockTime { get; set; } = 900;
 
+            [JsonProperty(PropertyName = "Lock Hackable Crates At Harbor")]
+            public bool Harbor { get; set; }
+
             [JsonProperty(PropertyName = "Block Timer Increase On Damage To Laptop")]
             public bool Laptop { get; set; } = true;
+
+            [JsonProperty(PropertyName = "Broadcast Locked Notification To Chat", NullValueHandling = NullValueHandling.Ignore)]
+            public bool NotifyLocked { get; set; }
+
+            [JsonProperty(PropertyName = "Broadcast Unlocked Notification To Chat", NullValueHandling = NullValueHandling.Ignore)]
+            public bool NotifyUnlocked { get; set; }
+
+            [JsonProperty(PropertyName = "Cooldown Between Notifications For Each Player")]
+            public float NotifyCooldown { get; set; }
         }
 
         private class BradleySettings
         {
             [JsonProperty(PropertyName = "Messages")]
-            public NotifySettings Messages { get; set; } = new NotifySettings();
+            public NotifySettings Messages { get; set; } = new();
 
             [JsonProperty(PropertyName = "Damage Lock Threshold")]
             public float Threshold { get; set; } = 0.2f;
@@ -2561,8 +2987,8 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Lock Bradley From Personal Apc Plugin")]
             public bool LockPersonal { get; set; } = true;
 
-            //[JsonProperty(PropertyName = "Lock Bradley From Raidable Bases Plugin")]
-            //public bool LockRaidableBases { get; set; } = true;
+            [JsonProperty(PropertyName = "Lock Bradley From Monument Bradley Plugin")]
+            public bool LockMonument { get; set; } = true;
 
             [JsonProperty(PropertyName = "Lock Bradley From Convoy Plugin")]
             public bool LockConvoy { get; set; } = true;
@@ -2578,12 +3004,21 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Rust Rewards RP")]
             public double RRP { get; set; } = 0.0;
+
+            [JsonProperty(PropertyName = "XP Reward")]
+            public double XP { get; set; } = 0.0;
+
+            [JsonProperty(PropertyName = "ShoppyStock Reward Value", NullValueHandling = NullValueHandling.Ignore)]
+            public double? SS { get; set; } = null;
+
+            [JsonProperty(PropertyName = "ShoppyStock Shop Name", NullValueHandling = NullValueHandling.Ignore)]
+            public string ShoppyStockShopName { get; set; }
         }
 
         private class HelicopterSettings
         {
             [JsonProperty(PropertyName = "Messages")]
-            public NotifySettings Messages { get; set; } = new NotifySettings();
+            public NotifySettings Messages { get; set; } = new();
 
             [JsonProperty(PropertyName = "Damage Lock Threshold")]
             public float Threshold { get; set; } = 0.2f;
@@ -2594,11 +3029,17 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Lock For X Seconds (0 = Forever)")]
             public int LockTime { get; set; } = 900;
 
+            [JsonProperty(PropertyName = "Unlock Heli When X Distance From Owner (0 = Disabled)")]
+            public float UnlockDist { get; set; } = 1500f;
+
             [JsonProperty(PropertyName = "Remove Fire From Crates")]
             public bool RemoveFireFromCrates { get; set; } = true;
 
             [JsonProperty(PropertyName = "Lock Heli From Convoy Plugin")]
             public bool LockConvoy { get; set; } = true;
+
+            [JsonProperty(PropertyName = "Lock Heli At Harbor")]
+            public bool? LockHarbor { get; set; } = null;
 
             [JsonProperty(PropertyName = "Lock Heli From Personal Heli Plugin")]
             public bool LockPersonal { get; set; } = true;
@@ -2608,12 +3049,24 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Rust Rewards RP")]
             public double RRP { get; set; } = 0.0;
+
+            [JsonProperty(PropertyName = "XP Reward")]
+            public double XP { get; set; } = 0.0;
+
+            [JsonProperty(PropertyName = "ShoppyStock Reward Value", NullValueHandling = NullValueHandling.Ignore)]
+            public double? SS { get; set; } = null;
+
+            [JsonProperty(PropertyName = "ShoppyStock Shop Name", NullValueHandling = NullValueHandling.Ignore)]
+            public string ShoppyStockShopName { get; set; }
         }
 
         private class NpcSettings
         {
+            [JsonProperty(PropertyName = "Reward Distance Multiplier")]
+            public DistanceMultiplierSettings Distance { get; set; } = new();
+
             [JsonProperty(PropertyName = "Messages")]
-            public NotifySettings Messages { get; set; } = new NotifySettings() { NotifyLocked = null };
+            public NotifySettings Messages { get; set; } = new() { NotifyLocked = null };
 
             [JsonProperty(PropertyName = "Enabled")]
             public bool Enabled { get; set; } = true;
@@ -2635,18 +3088,70 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Rust Rewards RP")]
             public double RRP { get; set; } = 0.0;
+
+            [JsonProperty(PropertyName = "XP Reward")]
+            public double XP { get; set; } = 0.0;
+
+            [JsonProperty(PropertyName = "ShoppyStock Reward Value", NullValueHandling = NullValueHandling.Ignore)]
+            public double? SS { get; set; } = null;
+
+            [JsonProperty(PropertyName = "ShoppyStock Shop Name", NullValueHandling = NullValueHandling.Ignore)]
+            public string ShoppyStockShopName { get; set; }
+        }
+
+        private class DistanceMultiplierSettings
+        {
+            [JsonProperty(PropertyName = "400 meters")]
+            public float meters400 { get; set; } = 1f;
+
+            [JsonProperty(PropertyName = "300 meters")]
+            public float meters300 { get; set; } = 1f;
+
+            [JsonProperty(PropertyName = "200 meters")]
+            public float meters200 { get; set; } = 1f;
+
+            [JsonProperty(PropertyName = "100 meters")]
+            public float meters100 { get; set; } = 1f;
+
+            [JsonProperty(PropertyName = "75 meters")]
+            public float meters75 { get; set; } = 1f;
+
+            [JsonProperty(PropertyName = "50 meters")]
+            public float meters50 { get; set; } = 1f;
+
+            [JsonProperty(PropertyName = "25 meters")]
+            public float meters25 { get; set; } = 1f;
+
+            [JsonProperty(PropertyName = "under")]
+            public float under { get; set; } = 1f;
+
+            public double GetDistanceMult(float distance) =>
+                distance >= 400 ? meters400 :
+                distance >= 300 ? meters300 :
+                distance >= 200 ? meters200 :
+                distance >= 100 ? meters100 :
+                distance >= 75 ? meters75 :
+                distance >= 50 ? meters50 :
+                distance >= 25 ? meters25 :
+                under;
         }
 
         private class SupplyDropSettings
         {
             [JsonProperty(PropertyName = "Allow Locking Signals With These Skins", ObjectCreationHandling = ObjectCreationHandling.Replace)]
-            public List<ulong> Skins { get; set; } = new List<ulong> { 0 };
+            public List<ulong> Skins { get; set; } = new() { 0 };
 
             [JsonProperty(PropertyName = "Lock Supply Drops To Players")]
             public bool Lock { get; set; } = true;
 
             [JsonProperty(PropertyName = "Lock Supply Drops From Excavator")]
             public bool Excavator { get; set; } = true;
+
+            [JsonProperty(PropertyName = "Lock Supply Drops From Helpful Supply Plugin")]
+            public bool HelpfulSupply { get; set; }
+
+            [JsonProperty(PropertyName = "Lock Supply Drops From Npc Random Raids Plugin")]
+            public bool NpcRandomRaids { get; set; }
 
             [JsonProperty(PropertyName = "Lock To Player For X Seconds (0 = Forever)")]
             public float LockTime { get; set; }
@@ -2669,11 +3174,20 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Cargo Plane Speed (Meters Per Second)")]
             public float Speed { get; set; } = 40f;
 
+            [JsonProperty(PropertyName = "Cargo Plane Low Altitude Drop")]
+            public bool LowDrop { get; set; } = true;
+
             [JsonProperty(PropertyName = "Bypass Spawning Cargo Plane")]
             public bool Bypass { get; set; }
 
             [JsonProperty(PropertyName = "Smoke Duration")]
             public float Smoke { get; set; } = -1f;
+
+            [JsonProperty(PropertyName = "Maximum Drop Distance From Signal")]
+            public float DistanceFromSignal { get; set; } = 20;
+
+            [JsonProperty(PropertyName = "Destroy Drop After X Seconds")]
+            public float DestroyTime { get; set; }
         }
 
         private class DamageReportSettings
@@ -2693,8 +3207,14 @@ namespace Oxide.Plugins
 
         public class PluginSettingsBaseLockout
         {
+            [JsonProperty(PropertyName = "Command To See Lockout Times")]
+            public string Command { get; set; } = "lockouts";
+
             [JsonProperty(PropertyName = "Time Between Bradley In Minutes")]
             public double Bradley { get; set; }
+
+            [JsonProperty(PropertyName = "Time Between Heli In Minutes")]
+            public double Heli { get; set; }
 
             [JsonProperty(PropertyName = "Lockout Entire Team")]
             public bool Team { get; set; } = true;
@@ -2704,24 +3224,51 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Exclude Members Offline For More Than X Minutes")]
             public float Time { get; set; } = 15f;
+
+            [JsonProperty(PropertyName = "Lockouts Ignored For Entities With Skin ID", ObjectCreationHandling = ObjectCreationHandling.Replace)]
+            public List<ulong> Exceptions { get; set; } = new();
         }
 
-        public class UILockoutSettings
+        public class UIBradleyLockoutSettings
         {
             [JsonProperty(PropertyName = "Enabled")]
             public bool Enabled { get; set; } = true;
 
             [JsonProperty(PropertyName = "Bradley Anchor Min")]
-            public string BradleyMin { get; set; } = "0.946 0.325";
+            public string AnchorMin { get; set; } = "0.946 0.325";
 
             [JsonProperty(PropertyName = "Bradley Anchor Max")]
-            public string BradleyMax { get; set; } = "0.986 0.360";
+            public string AnchorMax { get; set; } = "0.986 0.360";
 
             [JsonProperty(PropertyName = "Bradley Background Color")]
-            public string BradleyBackgroundColor { get; set; } = "#A52A2A";
+            public string BackgroundColor { get; set; } = "#A52A2A";
 
             [JsonProperty(PropertyName = "Bradley Text Color")]
-            public string BradleyTextColor { get; set; } = "#FFFF00";
+            public string TextColor { get; set; } = "#FFFF00";
+
+            [JsonProperty(PropertyName = "Panel Alpha")]
+            public float Alpha { get; set; } = 1f;
+
+            [JsonProperty(PropertyName = "Font Size")]
+            public int FontSize { get; set; } = 18;
+        }
+
+        public class UIHeliLockoutSettings
+        {
+            [JsonProperty(PropertyName = "Enabled")]
+            public bool Enabled { get; set; } = true;
+
+            [JsonProperty(PropertyName = "Heli Anchor Min")]
+            public string AnchorMin { get; set; } = "0.896 0.325";
+
+            [JsonProperty(PropertyName = "Heli Anchor Max")]
+            public string AnchorMax { get; set; } = "0.936 0.360";
+
+            [JsonProperty(PropertyName = "Heli Background Color")]
+            public string BackgroundColor { get; set; } = "#1F51FF";
+
+            [JsonProperty(PropertyName = "Heli Text Color")]
+            public string TextColor { get; set; } = "#FFFF00";
 
             [JsonProperty(PropertyName = "Panel Alpha")]
             public float Alpha { get; set; } = 1f;
@@ -2732,8 +3279,14 @@ namespace Oxide.Plugins
 
         public class UISettings
         {
+            [JsonProperty(PropertyName = "Command To Toggle UI")]
+            public string Command { get; set; } = "lockui";
+
             [JsonProperty(PropertyName = "Bradley")]
-            public UILockoutSettings Bradley { get; set; } = new UILockoutSettings();
+            public UIBradleyLockoutSettings Bradley { get; set; } = new();
+
+            [JsonProperty(PropertyName = "Heli")]
+            public UIHeliLockoutSettings Heli { get; set; } = new();
         }
 
         public class DiscordMessagesSettings
@@ -2758,36 +3311,39 @@ namespace Oxide.Plugins
 
             [JsonProperty(PropertyName = "Add BattleMetrics Link")]
             public bool BattleMetrics { get; set; } = true;
+
+            [JsonProperty(PropertyName = "Show Notification In Server Console")]
+            public bool NotifyConsole { get; set; }
         }
 
         private class Configuration
         {
             [JsonProperty(PropertyName = "Bradley Settings")]
-            public BradleySettings Bradley { get; set; } = new BradleySettings();
+            public BradleySettings Bradley { get; set; } = new();
 
             [JsonProperty(PropertyName = "Helicopter Settings")]
-            public HelicopterSettings Helicopter { get; set; } = new HelicopterSettings();
+            public HelicopterSettings Helicopter { get; set; } = new();
 
             [JsonProperty(PropertyName = "Hackable Crate Settings")]
-            public HackableSettings Hackable { get; set; } = new HackableSettings();
+            public HackableSettings Hackable { get; set; } = new();
 
             [JsonProperty(PropertyName = "Npc Settings")]
-            public NpcSettings Npc { get; set; } = new NpcSettings();
+            public NpcSettings Npc { get; set; } = new();
 
             [JsonProperty(PropertyName = "Supply Drop Settings")]
-            public SupplyDropSettings SupplyDrop { get; set; } = new SupplyDropSettings();
+            public SupplyDropSettings SupplyDrop { get; set; } = new();
 
             [JsonProperty(PropertyName = "Damage Report Settings")]
-            public DamageReportSettings Report { get; set; } = new DamageReportSettings();
+            public DamageReportSettings Report { get; set; } = new();
 
             [JsonProperty(PropertyName = "Player Lockouts (0 = ignore)")]
-            public PluginSettingsBaseLockout Lockout { get; set; } = new PluginSettingsBaseLockout();
+            public PluginSettingsBaseLockout Lockout { get; set; } = new();
 
             [JsonProperty(PropertyName = "Lockout UI")]
-            public UISettings UI { get; set; } = new UISettings();
+            public UISettings UI { get; set; } = new();
 
             [JsonProperty(PropertyName = "Discord Messages")]
-            public DiscordMessagesSettings DiscordMessages { get; set; } = new DiscordMessagesSettings();
+            public DiscordMessagesSettings DiscordMessages { get; set; } = new();
 
             [JsonProperty(PropertyName = "Chat ID")]
             public ulong ChatID { get; set; }
@@ -2806,24 +3362,34 @@ namespace Oxide.Plugins
                 if (config.Bradley.Threshold > 1f) config.Bradley.Threshold /= 100f;
                 if (config.Helicopter.Threshold > 1f) config.Helicopter.Threshold /= 100f;
                 if (config.Npc.Threshold > 1f) config.Npc.Threshold /= 100f;
+                if (!config.Helicopter.LockHarbor.HasValue) config.Helicopter.LockHarbor = config.Bradley.LockHarbor;
                 SaveConfig();
             }
             catch (Exception ex)
             {
-                Debug.LogException(ex);
+                canSaveConfig = false;
+                Puts(ex.ToString());
                 LoadDefaultConfig();
             }
         }
 
-        protected override void SaveConfig() => Config.WriteObject(config);
+        private bool canSaveConfig = true;
 
-        protected override void LoadDefaultConfig() => config = new Configuration();
+        protected override void SaveConfig()
+        {
+            if (canSaveConfig)
+            {
+                Config.WriteObject(config);
+            }
+        }
+
+        protected override void LoadDefaultConfig() => config = new();
 
         private bool HasPermission(BasePlayer player, string perm) => permission.UserHasPermission(player.UserIDString, perm);
 
         protected override void LoadDefaultMessages()
         {
-            lang.RegisterMessages(new Dictionary<string, string>
+            lang.RegisterMessages(new()
             {
                 ["NoPermission"] = "You do not have permission to use this command!",
                 ["DamageReport"] = "Damage report for {0}",
@@ -2841,15 +3407,22 @@ namespace Oxide.Plugins
                 ["ThrownSupplySignalAt"] = "{0} in {1} has thrown a supply signal!",
                 ["Format"] = "<color=#C0C0C0>{0:0.00}</color> (<color=#C3FBFE>{1:0.00}%</color>)",
                 ["CannotLeaveBradley"] = "You cannot leave your team until the Bradley is destroyed!",
+                ["CannotLeaveHeli"] = "You cannot leave your team until the Heli is destroyed!",
                 ["LockedOutBradley"] = "You are locked out from Bradley for {0}",
+                ["LockedOutHeli"] = "You are locked out from Heli for {0}",
+                ["NoLockouts"] = "You have no lockouts.",
                 ["Time"] = "{0}m",
+                ["Heli Time"] = "{0}m",
+                ["HeliKilled"] = "A bradley was killed.",
                 ["BradleyKilled"] = "A bradley was killed.",
                 ["BradleyUnlocked"] = "The bradley at {0} has been unlocked.",
                 ["HeliUnlocked"] = "The heli at {0} has been unlocked.",
-                ["FirstLock"] = "First locked to {0} at {1}% threshold"
+                ["FirstLock"] = "First locked to {0} at {1}% threshold",
+                ["CrateLocked"] = "A crate has been locked to {0} at {1}",
+                ["CrateUnlocked"] = "The crate at {0} is no longer locked to {1}",
             }, this, "en");
 
-            lang.RegisterMessages(new Dictionary<string, string>
+            lang.RegisterMessages(new()
             {
                 ["NoPermission"] = "У вас нет разрешения на использование этой команды!",
                 ["DamageReport"] = "Нанесенный урон по {0}",
@@ -2866,8 +3439,13 @@ namespace Oxide.Plugins
                 ["ThrownSupplySignalAt"] = "{0} {1} запросил сброс припасов!",
                 ["Format"] = "<color=#C0C0C0>{0:0.00}</color> (<color=#C3FBFE>{1:0.00}%</color>)",
                 ["CannotLeaveBradley"] = "Вы не можете покинуть команду, пока танк не будет уничтожен!",
+                ["CannotLeaveHeli"] = "Вы не можете покинуть свою команду, пока Heli не будет уничтожен!",
                 ["LockedOutBradley"] = "Вы заблокированы от танка на {0}",
+                ["LockedOutHeli"] = "Вы заблокированы в Heli на {0}",
+                ["NoLockouts"] = "У тебя нет замок.",
                 ["Time"] = "{0} м",
+                ["Heli Time"] = "{0} м",
+                ["HeliKilled"] = "Вертолёт был уничтожен.",
                 ["BradleyKilled"] = "Танк был уничтожен.",
                 ["BradleyUnlocked"] = "Танк на {0} разблокирован.",
                 ["HeliUnlocked"] = "Вертолёт на {0} разблокирован.",
