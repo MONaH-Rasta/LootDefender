@@ -16,7 +16,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.1.9")]
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.2.0")]
     [Description("Defends loot from other players who dealt less damage than you.")]
     internal class LootDefender : RustPlugin
     {
@@ -232,7 +232,7 @@ namespace Oxide.Plugins
             {
                 OwnerID = 0;
 
-                if (_entity.IsValid() && !_entity.IsDestroyed)
+                if (_entity != null)
                 {
                     _entity.OwnerID = 0;
                 }
@@ -1597,22 +1597,7 @@ namespace Oxide.Plugins
 
         private void OnExcavatorSuppliesRequested(ExcavatorSignalComputer computer, BasePlayer player, CargoPlane plane)
         {
-            float y = plane.transform.position.y;
-
-            if (config.SupplyDrop.LowDrop) y /= Core.Random.Range(2, 4); // Change Y, fast drop
-
-            plane.transform.position.Set(plane.transform.position.x, y, plane.transform.position.z);
-            plane.startPos.Set(plane.startPos.x, y, plane.startPos.z);
-            plane.endPos.Set(plane.endPos.x, y, plane.endPos.z);
-            plane.secondsToTake = Vector3.Distance(plane.startPos, plane.endPos) / Mathf.Clamp(config.SupplyDrop.Speed, 40f, World.Size);
-            plane.OwnerID = player.userID;
-            plane.skinID = supplyDropSkinID;
-
-            if (config.SupplyDrop.DistanceFromSignal > -1)
-            {
-                float j = config.SupplyDrop.DistanceFromSignal;
-                plane.InitDropPosition(computer.transform.position + new Vector3(UnityEngine.Random.Range(-j, j), 0f, UnityEngine.Random.Range(-j, j)));
-            }
+            SetupCargoPlane(plane, computer, player.userID);
 
             cargoPlanes.Add(plane);
         }
@@ -1636,23 +1621,8 @@ namespace Oxide.Plugins
             {
                 return;
             }
-
-            float y = plane.transform.position.y;
             
-            if (config.SupplyDrop.LowDrop) y /= Core.Random.Range(2, 4); // Change Y, fast drop
-
-            plane.transform.position.Set(plane.transform.position.x, y, plane.transform.position.z);
-            plane.startPos.Set(plane.startPos.x, y, plane.startPos.z);
-            plane.endPos.Set(plane.endPos.x, y, plane.endPos.z);
-            plane.secondsToTake = Vector3.Distance(plane.startPos, plane.endPos) / Mathf.Clamp(config.SupplyDrop.Speed, 40f, World.Size);
-            plane.OwnerID = ss.OwnerID;
-            plane.skinID = supplyDropSkinID;
-
-            if (config.SupplyDrop.DistanceFromSignal > -1)
-            {
-                float j = config.SupplyDrop.DistanceFromSignal;
-                plane.InitDropPosition(ss.transform.position + new Vector3(UnityEngine.Random.Range(-j, j), 0f, UnityEngine.Random.Range(-j, j)));
-            }
+            SetupCargoPlane(plane, ss, ss.OwnerID);
 
             if (config.SupplyDrop.Smoke > -1)
             {
@@ -1673,6 +1643,36 @@ namespace Oxide.Plugins
             cargoPlanes.Add(plane);
 
             Interface.CallHook("OnModifiedCargoPlaneSignaled", plane, ss);
+        }
+
+        private void SetupCargoPlane(CargoPlane plane, BaseEntity entity, ulong userid)
+        {
+            float y = plane.transform.position.y;
+            float j = config.SupplyDrop.DistanceFromSignal;
+
+            if (config.SupplyDrop.LowDrop) y /= Core.Random.Range(2, 4); // Change Y, fast drop
+
+            plane.transform.position = new Vector3(plane.transform.position.x, y, plane.transform.position.z);
+            plane.startPos = new Vector3(plane.startPos.x, y, plane.startPos.z);
+
+            if (j > -1)
+            {
+                plane.dropPosition = entity.transform.position + new Vector3(UnityEngine.Random.Range(-j, j), 0f, UnityEngine.Random.Range(-j, j));
+                plane.endPos = plane.dropPosition + (plane.endPos - plane.startPos).normalized * (plane.dropPosition - plane.startPos).magnitude;
+                //Vector3 b = plane.dropPosition - plane.startPos;
+                //plane.endPos = plane.dropPosition + b.normalized * b.magnitude;
+                plane.endPos.y = y;
+            }
+            else
+            {
+                plane.endPos = new Vector3(plane.endPos.x, y, plane.endPos.z);
+                plane.dropPosition = entity.transform.position;
+            }
+
+            plane.dropPosition.y = 0f;
+            plane.secondsToTake = Vector3.Distance(plane.startPos, plane.endPos) / Mathf.Clamp(config.SupplyDrop.Speed, 40f, World.Size);
+            plane.OwnerID = userid;
+            plane.skinID = supplyDropSkinID;
         }
 
         private void OnSupplyDropDropped(SupplyDrop drop, CargoPlane plane)
@@ -2230,7 +2230,7 @@ namespace Oxide.Plugins
 
         private static List<T> FindEntitiesOfType<T>(Vector3 a, float n, int m = -1) where T : BaseEntity
         {
-            List<T> entities = Pool.GetList<T>();
+            List<T> entities = Pool.Get<List<T>>();
             Vis.Entities(a, n, entities, m, QueryTriggerInteraction.Collide);
             entities.RemoveAll(x => !x || x.IsDestroyed);
             return entities;
@@ -2287,7 +2287,7 @@ namespace Oxide.Plugins
                     }
                 }
             }
-            Pool.FreeList(ref entities);
+            Pool.FreeUnmanaged(ref entities);
         }
 
         private void LockInRadius<T>(Vector3 position, LockInfo lockInfo, DamageEntryType damageEntryType) where T : BaseEntity
@@ -2313,7 +2313,7 @@ namespace Oxide.Plugins
                     entity.Invoke(() => entity.OwnerID = 0, time);
                 }
             }
-            Pool.FreeList(ref entities);
+            Pool.FreeUnmanaged(ref entities);
         }
 
         private void LockInRadius(Vector3 position, ulong damageKey, DamageInfo damageInfo, ulong playerSteamID)
@@ -2338,7 +2338,7 @@ namespace Oxide.Plugins
                     timer.Once(3f, () => data.Damage.Remove(damageKey));
                 }
             }
-            Pool.FreeList(ref corpses);
+            Pool.FreeUnmanaged(ref corpses);
         }
 
         private void LockInRadius(Vector3 position, LockInfo lockInfo, ulong playerSteamID)
@@ -2362,7 +2362,7 @@ namespace Oxide.Plugins
                     data.Lock[container.net.ID.Value] = lockInfo;
                 }
             }
-            Pool.FreeList(ref containers);
+            Pool.FreeUnmanaged(ref containers);
         }
 
         private static int GetLockTime(DamageEntryType damageEntryType)
