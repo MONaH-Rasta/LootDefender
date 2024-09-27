@@ -21,7 +21,7 @@ namespace Oxide.Plugins
     internal class LootDefender : RustPlugin
     {
         [PluginReference]
-        Plugin PersonalHeli, Friends, Clans, RustRewards, HeliSignals, BradleyDrops, HelpfulSupply, ShoppyStock, XLevels, XPerience, SkillTree;
+        readonly Plugin PersonalHeli, Friends, Clans, RustRewards, HeliSignals, BradleyDrops, HelpfulSupply, ShoppyStock, XLevels, XPerience, SkillTree;
 
         private static LootDefender Instance;
         private static StringBuilder sb;
