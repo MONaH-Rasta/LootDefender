@@ -16,7 +16,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.2.0")]
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.2.2")]
     [Description("Defends loot from other players who dealt less damage than you.")]
     internal class LootDefender : RustPlugin
     {
@@ -257,6 +257,14 @@ namespace Oxide.Plugins
                         CreateMessage(target, "HeliUnlocked", PositionToGrid(_position));
                     }
                 }
+
+                if (damageEntryType == DamageEntryType.NPC && config.Npc.Messages.NotifyChat)
+                {
+                    foreach (var target in BasePlayer.activePlayerList)
+                    {
+                        CreateMessage(target, "NpcUnlocked", PositionToGrid(_position));
+                    }
+                }
             }
 
             private void Lock(BaseEntity entity, ulong id)
@@ -346,6 +354,13 @@ namespace Oxide.Plugins
                 {
                     if (!npc.userID.IsSteamId() && damage >= entity.MaxHealth() * config.Npc.Threshold && !Instance.HasPermission(attacker, "lootdefender.bypassnpclock"))
                     {
+                        if (config.Npc.Messages.NotifyLocked == true)
+                        {
+                            foreach (var target in BasePlayer.activePlayerList)
+                            {
+                                CreateMessage(target, "Locked Npc", grid, npc.displayName, attacker.displayName);
+                            }
+                        }
                         Lock(entity, attacker.userID);
                     }
                 }
@@ -379,8 +394,12 @@ namespace Oxide.Plugins
                 return entry;
             }
 
+            public bool isKilled;
+
             public void OnKilled(Vector3 position, HitInfo hitInfo, float distance)
             {
+                if (isKilled) return;
+                isKilled = true;
                 SetCanInteract();
                 DisplayDamageReport();
                 FindLooters(position, hitInfo, distance);
@@ -389,8 +408,8 @@ namespace Oxide.Plugins
             private void FindLooters(Vector3 position, HitInfo hitInfo, float distance)
             {
                 var weapon = hitInfo?.Weapon?.GetItem()?.info?.shortname ?? hitInfo?.WeaponPrefab?.ShortPrefabName ?? "";
-                List<ulong> looters = new();
-                List<ulong> users = new();
+                HashSet<ulong> looters = new();
+                HashSet<ulong> users = new();
                 
                 foreach (var x in damageKeys)
                 {
@@ -406,7 +425,7 @@ namespace Oxide.Plugins
 
                 foreach (var userid in users)
                 {
-                    Instance.GiveXpReward(_entity, this, userid, weapon, users.Count);
+                    Instance.GiveXpReward(_entity, this, userid, weapon, distance, users.Count);
                     Instance.GiveRustReward(_entity, this, userid, weapon, users.Count);
                     Instance.GiveShopReward(_entity, this, userid, weapon, distance, users.Count);
                 }
@@ -783,7 +802,7 @@ namespace Oxide.Plugins
                 Subscribe(nameof(OnCargoPlaneSignaled));
             }
 
-            if (config.SupplyDrop.DestroyTime > 0f)
+            if (config.SupplyDrop.DestroyTime > 0f || config.CH47Gibs)
             {
                 Subscribe(nameof(OnEntitySpawned));
             }
@@ -992,7 +1011,7 @@ namespace Oxide.Plugins
             return null;
         }
 
-        public static bool IsKilled(BaseNetworkable a) { try { return (object)a == null || a.IsDestroyed || a.transform == null; } catch { return true; } }
+        public static bool IsKilled(BaseNetworkable a) => (object)a == null || a.IsDestroyed || !a.isSpawned;
 
         private bool BlockDamage(DamageEntryType damageEntryType)
         {
@@ -1203,7 +1222,7 @@ namespace Oxide.Plugins
 
         private void OnEntityDeathHandler(BaseCombatEntity entity, DamageEntryType damageEntryType, HitInfo hitInfo)
         {
-            if (data.Damage.TryGetValue(entity.net.ID.Value, out var damageInfo))
+            if (data.Damage.TryGetValue(entity.net.ID.Value, out var damageInfo) && !damageInfo.isKilled)
             {
                 if (damageEntryType == DamageEntryType.Bradley && !CanLockBradley(entity)) return;
                 if (damageEntryType == DamageEntryType.Heli && !CanLockHeli(entity)) return;
@@ -1214,6 +1233,11 @@ namespace Oxide.Plugins
                     var lockInfo = new LockInfo(damageInfo, damageEntryType == DamageEntryType.Heli ? config.Helicopter.LockTime : config.Bradley.LockTime);
                     var position = entity.transform.position;
 
+                    if (entity is PatrolHelicopter && (position - Vector3.zero).magnitude > World.Size / 1.25f)
+                    {
+                        return;
+                    }
+                    
                     damageInfo.OnKilled(position, hitInfo, hitInfo?.ProjectileDistance ?? Vector3.Distance(position, damageInfo.lastAttackedPosition));
 
                     timer.Once(0.1f, () =>
@@ -1306,11 +1330,15 @@ namespace Oxide.Plugins
             }
 
             var distance = Vector3.Distance(attacker.transform.position, entity.transform.position);
+            
+            ApplyWeaponMultiplierReward(damageInfo, weapon, ref amount, distance);
+
+            if (amount <= 0) return;
 
             RustRewards?.Call("GiveRustReward", attacker, 0, amount, entity, weapon, distance, entity.ShortPrefabName);
         }
 
-        void GiveXpReward(BaseEntity entity, DamageInfo damageInfo, ulong userid, string weapon, int total)
+        void GiveXpReward(BaseEntity entity, DamageInfo damageInfo, ulong userid, string weapon, float distance, int total)
         {
             var amount = damageInfo.damageEntryType == DamageEntryType.Bradley ? config.Bradley.XP : damageInfo.damageEntryType == DamageEntryType.Heli ? config.Helicopter.XP : config.Npc.XP;
 
@@ -1320,6 +1348,10 @@ namespace Oxide.Plugins
             }
 
             var attacker = BasePlayer.FindByID(userid);
+
+            ApplyWeaponMultiplierReward(damageInfo, weapon, ref amount, distance);
+
+            if (amount <= 0) return;
 
             if (SkillTree != null)
             {
@@ -1347,7 +1379,7 @@ namespace Oxide.Plugins
 
             var amount = damageInfo.damageEntryType == DamageEntryType.Bradley ? config.Bradley.SS : damageInfo.damageEntryType == DamageEntryType.Heli ? config.Helicopter.SS : config.Npc.SS;
 
-            if (!amount.HasValue || amount.Value <= 0.0)
+            if (amount <= 0.0)
             {
                 return;
             }
@@ -1359,30 +1391,34 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (damageInfo.damageEntryType == DamageEntryType.NPC)
-			{
-                if (distance > 400) distance = 401;
-                var distanceMulti = config.Npc.Distance.GetDistanceMult(distance);
-                amount = Math.Round(distanceMulti * amount.Value, 0);
-                if (Interface.Oxide.CallHook("OnNpcWeaponMult", userid, weapon, distance) is float weaponMulti)
-                {
-                    amount = Math.Round(weaponMulti * amount.Value, 0);
-                    if (amount < 1) amount = 1;
-                }
-                if (amount <= 0) return;
-			}
+            ApplyWeaponMultiplierReward(damageInfo, weapon, ref amount, distance);
+
+            if (amount <= 0) return;
 
             amount /= total;
-            amount = Math.Round(amount.Value, 0);
+            amount = Math.Round(amount, 0);
 
             ShoppyStock?.Call("GiveCurrency", storeName, userid, Mathf.Max(1, (int)amount));
 
             if (!(BasePlayer.FindByID(userid) is BasePlayer attacker) || !attacker.IsConnected)
                 return;
 
-            string msg = "<color=#DDDDDD>Added</color> <color=#57F1EC>" + amount + "</color> <color=#8BE18A>" + storeName + "</color> <color=#DDDDDD>to your account.</color>";
+            CreateMessage(attacker, "ShoppyStockReward", amount, storeName);
+        }
 
-            Player.Message(attacker, msg, config.ChatID);
+        private static void ApplyWeaponMultiplierReward(DamageInfo damageInfo, string weapon, ref double amount, float distance)
+        {
+            if (damageInfo.damageEntryType == DamageEntryType.NPC)
+            {
+                if (distance > 400) distance = 401;
+                var distanceMulti = config.Npc.Distance.GetDistanceMult(distance);
+                amount = Math.Round(distanceMulti * amount, 0);
+                if (config.Npc.WeaponMultipliers.TryGetValue(weapon, out double weaponMulti))
+                {
+                    amount = Math.Round(weaponMulti * amount, 0);
+                    if (amount < 1) amount = 1;
+                }
+            }
         }
 
         private object OnAutoPickupEntity(BasePlayer player, BaseEntity entity) => CanLootEntityHandler(player, entity);
@@ -1491,6 +1527,12 @@ namespace Oxide.Plugins
             {
                 _personal.Add(apc.net.ID.Value);
             }
+        }
+
+        private void OnEntitySpawned(CH47Helicopter heli)
+        {
+            if (!config.CH47Gibs || !heli) return;
+            heli.serverGibs.guid = string.Empty;
         }
 
         #region SupplyDrops
@@ -2014,15 +2056,15 @@ namespace Oxide.Plugins
             }
         }
 
-        private void LockoutLooters(List<ulong> looters, Vector3 position, DamageEntryType damageEntryType, ulong skinID)
+        private void LockoutLooters(HashSet<ulong> looters, Vector3 position, DamageEntryType damageEntryType, ulong skinID)
         {
             if (looters.Count == 0)
             {
                 return;
             }
 
-            List<ulong> members = new(looters);
-            List<string> usernames = new();
+            HashSet<ulong> members = new(looters);
+            HashSet<string> usernames = new();
 
             foreach (ulong looterId in looters)
             {
@@ -2035,10 +2077,10 @@ namespace Oxide.Plugins
                 LockoutClan(members, looterId, damageEntryType, skinID);
             }
 
-            SendDiscordMessage(members, usernames, position, damageEntryType);
+            SendDiscordMessage(members, usernames.ToList(), position, damageEntryType);
         }
 
-        private void LockoutTeam(List<ulong> members, ulong looterId, DamageEntryType damageEntryType, ulong skinID)
+        private void LockoutTeam(HashSet<ulong> members, ulong looterId, DamageEntryType damageEntryType, ulong skinID)
         {
             if (!config.Lockout.Team || !RelationshipManager.ServerInstance.playerToTeam.TryGetValue(looterId, out var team))
             {
@@ -2065,7 +2107,7 @@ namespace Oxide.Plugins
             }
         }
 
-        private void LockoutClan(List<ulong> members, ulong looterId, DamageEntryType damageEntryType, ulong skinID)
+        private void LockoutClan(HashSet<ulong> members, ulong looterId, DamageEntryType damageEntryType, ulong skinID)
         {
             if (!config.Lockout.Clan || Instance?.Clans?.Call("GetClanMembers", looterId) is not List<string> clan)
             {
@@ -2799,7 +2841,7 @@ namespace Oxide.Plugins
 
         private static string PositionToGrid(Vector3 position) => PhoneController.PositionToGridCoord(position);
 
-        private void SendDiscordMessage(List<ulong> members, List<string> usernames, Vector3 position, DamageEntryType damageEntryType)
+        private void SendDiscordMessage(HashSet<ulong> members, List<string> usernames, Vector3 position, DamageEntryType damageEntryType)
         {
             if (config.DiscordMessages.NotifyConsole)
             {
@@ -2994,11 +3036,11 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "XP Reward")]
             public double XP { get; set; } = 0.0;
 
-            [JsonProperty(PropertyName = "ShoppyStock Reward Value", NullValueHandling = NullValueHandling.Ignore)]
-            public double? SS { get; set; } = null;
+            [JsonProperty(PropertyName = "ShoppyStock Reward Value")]
+            public double SS { get; set; }
 
-            [JsonProperty(PropertyName = "ShoppyStock Shop Name", NullValueHandling = NullValueHandling.Ignore)]
-            public string ShoppyStockShopName { get; set; }
+            [JsonProperty(PropertyName = "ShoppyStock Shop Name")]
+            public string ShoppyStockShopName { get; set; } = "";
         }
 
         private class HelicopterSettings
@@ -3036,11 +3078,11 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "XP Reward")]
             public double XP { get; set; } = 0.0;
 
-            [JsonProperty(PropertyName = "ShoppyStock Reward Value", NullValueHandling = NullValueHandling.Ignore)]
-            public double? SS { get; set; } = null;
+            [JsonProperty(PropertyName = "ShoppyStock Reward Value")]
+            public double SS { get; set; }
 
-            [JsonProperty(PropertyName = "ShoppyStock Shop Name", NullValueHandling = NullValueHandling.Ignore)]
-            public string ShoppyStockShopName { get; set; }
+            [JsonProperty(PropertyName = "ShoppyStock Shop Name")]
+            public string ShoppyStockShopName { get; set; } = "";
         }
 
         private class NpcSettings
@@ -3048,8 +3090,70 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Reward Distance Multiplier")]
             public DistanceMultiplierSettings Distance { get; set; } = new();
 
+            [JsonProperty(PropertyName = "Reward Weapon Multiplier", ObjectCreationHandling = ObjectCreationHandling.Replace)]
+            public Dictionary<string, double> WeaponMultipliers { get; set; } = new()
+            {
+                { "knife.skinning", 1.0 },
+                { "gun.water", 1.0 },
+                { "pistol.water", 1.0 },
+                { "candycaneclub", 1.0 },
+                { "snowball", 1.0 },
+                { "snowballgun", 1.0 },
+                { "rifle.ak", 1.0 },
+                { "rifle.ak.diver", 1.0 },
+                { "rifle.ak.ice", 1.0 },
+                { "grenade.beancan", 1.0 },
+                { "rifle.bolt", 1.0 },
+                { "bone.club", 1.0 },
+                { "knife.bone", 1.0 },
+                { "bow.hunting", 1.0 },
+                { "salvaged.cleaver", 1.0 },
+                { "bow.compound", 1.0 },
+                { "crossbow", 1.0 },
+                { "shotgun.double", 1.0 },
+                { "pistol.eoka", 1.0 },
+                { "grenade.f1", 1.0 },
+                { "flamethrower", 1.0 },
+                { "grenade.flashbang", 1.0 },
+                { "pistol.prototype17", 1.0 },
+                { "multiplegrenadelauncher", 1.0 },
+                { "mace.baseballbat", 1.0 },
+                { "knife.butcher", 1.0 },
+                { "pitchfork", 1.0 },
+                { "vampire.stake", 1.0 },
+                { "hmlmg", 1.0 },
+                { "homingmissile.launcher", 1.0 },
+                { "knife.combat", 1.0 },
+                { "rifle.l96", 1.0 },
+                { "rifle.lr300", 1.0 },
+                { "lmg.m249", 1.0 },
+                { "rifle.m39", 1.0 },
+                { "pistol.m92", 1.0 },
+                { "mace", 1.0 },
+                { "machete", 1.0 },
+                { "grenade.molotov", 1.0 },
+                { "smg.mp5", 1.0 },
+                { "pistol.nailgun", 1.0 },
+                { "paddle", 1.0 },
+                { "shotgun.waterpipe", 1.0 },
+                { "pistol.python", 1.0 },
+                { "pistol.revolver", 1.0 },
+                { "rocket.launcher", 1.0 },
+                { "shotgun.pump", 1.0 },
+                { "pistol.semiauto", 1.0 },
+                { "rifle.semiauto", 1.0 },
+                { "smg.2", 1.0 },
+                { "shotgun.spas12", 1.0 },
+                { "speargun", 1.0 },
+                { "spear.stone", 1.0 },
+                { "longsword", 1.0 },
+                { "salvaged.sword", 1.0 },
+                { "smg.thompson", 1.0 },
+                { "spear.wooden", 1.0 }
+            };
+
             [JsonProperty(PropertyName = "Messages")]
-            public NotifySettings Messages { get; set; } = new() { NotifyLocked = null };
+            public NotifySettings Messages { get; set; } = new() { NotifyLocked = false };
 
             [JsonProperty(PropertyName = "Enabled")]
             public bool Enabled { get; set; } = true;
@@ -3075,11 +3179,11 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "XP Reward")]
             public double XP { get; set; } = 0.0;
 
-            [JsonProperty(PropertyName = "ShoppyStock Reward Value", NullValueHandling = NullValueHandling.Ignore)]
-            public double? SS { get; set; } = null;
+            [JsonProperty(PropertyName = "ShoppyStock Reward Value")]
+            public double SS { get; set; }
 
-            [JsonProperty(PropertyName = "ShoppyStock Shop Name", NullValueHandling = NullValueHandling.Ignore)]
-            public string ShoppyStockShopName { get; set; }
+            [JsonProperty(PropertyName = "ShoppyStock Shop Name")]
+            public string ShoppyStockShopName { get; set; } = "";
         }
 
         private class DistanceMultiplierSettings
@@ -3328,6 +3432,9 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "Discord Messages")]
             public DiscordMessagesSettings DiscordMessages { get; set; } = new();
 
+            [JsonProperty(PropertyName = "Disable CH47 Gibs")]
+            public bool CH47Gibs { get; set; }
+
             [JsonProperty(PropertyName = "Chat ID")]
             public ulong ChatID { get; set; }
         }
@@ -3346,6 +3453,7 @@ namespace Oxide.Plugins
                 if (config.Helicopter.Threshold > 1f) config.Helicopter.Threshold /= 100f;
                 if (config.Npc.Threshold > 1f) config.Npc.Threshold /= 100f;
                 if (!config.Helicopter.LockHarbor.HasValue) config.Helicopter.LockHarbor = config.Bradley.LockHarbor;
+                if (!config.Npc.Messages.NotifyLocked.HasValue) config.Npc.Messages.NotifyLocked = false;
                 SaveConfig();
             }
             catch (Exception ex)
@@ -3384,6 +3492,7 @@ namespace Oxide.Plugins
                 ["CannotDamageThis"] = "You cannot damage this!",
                 ["Locked Heli"] = "{0}: Heli has been locked to <color=#FF0000>{1}</color> and their team",
                 ["Locked Bradley"] = "{0}: Bradley has been locked to <color=#FF0000>{1}</color> and their team",
+                ["Locked Npc"] = "{0}: {1} has been locked to <color=#FF0000>{2}</color> and their team",
                 ["Helicopter"] = "Heli",
                 ["BradleyAPC"] = "Bradley",
                 ["ThrownSupplySignal"] = "{0} has thrown a supply signal!",
@@ -3403,19 +3512,23 @@ namespace Oxide.Plugins
                 ["FirstLock"] = "First locked to {0} at {1}% threshold",
                 ["CrateLocked"] = "A crate has been locked to {0} at {1}",
                 ["CrateUnlocked"] = "The crate at {0} is no longer locked to {1}",
+                ["NpcUnlocked"] = "{0} at {1} has been unlocked.",
+                ["ShoppyStockReward"] = "Added {0} {1} to your account.",
             }, this, "en");
 
             lang.RegisterMessages(new()
             {
                 ["NoPermission"] = "У вас нет разрешения на использование этой команды!",
                 ["DamageReport"] = "Нанесенный урон по {0}",
-                ["DamageTime"] = "{0} was taken down after {1} seconds",
+                ["DamageTime"] = "{0} был уничтожен за {1} секунд",
                 ["CannotLoot"] = "Это не ваш лут, основная часть урона насена не вами.",
                 ["CannotLootIt"] = "Вы не можете открыть этот ящик с припасами.",
+                ["CannotLootCrate"] = "Вы не можете разграбить кратэ.",
                 ["CannotMine"] = "Вы не можете добывать это, основная часть урона насена не вами.",
                 ["CannotDamageThis"] = "Вы не можете повредить это!",
                 ["Locked Heli"] = "{0}: Этот патрульный вертолёт принадлежит <color=#FF0000>{1}</color> и участникам команды",
                 ["Locked Bradley"] = "{0}: Этот танк принадлежит <color=#FF0000>{1}</color> и участникам команды",
+                ["Locked Npc"] = "{0}: {1} заблокирован на <color=#FF0000>{2}</color> и его команду.",
                 ["Helicopter"] = "Патрульному вертолету",
                 ["BradleyAPC"] = "Танку",
                 ["ThrownSupplySignal"] = "{0} запросил сброс припасов!",
@@ -3432,7 +3545,13 @@ namespace Oxide.Plugins
                 ["BradleyKilled"] = "Танк был уничтожен.",
                 ["BradleyUnlocked"] = "Танк на {0} разблокирован.",
                 ["HeliUnlocked"] = "Вертолёт на {0} разблокирован.",
-                ["FirstLock"] = "First locked to {0} at {1}% threshold"
+                ["FirstLock"] = "Добыча заблокирована на игрока {0}, потому что он нанёс {1}% урона.",
+                ["CannotLootCrate"] = "Вы не можете ограбить этот ящик.",
+                ["CrateLocked"] = "Ящик в квадрате {1} заблокирован на {0}",
+                ["CrateUnlocked"] = "Ящик в квадрате {0} больше не заблокирован на {1}",
+                ["NpcUnlocked"] = "{0} в координатах {1} разблокирован.",
+                ["ShoppyStockReward"] = "Добавлено {0} {1} в ваш аккаунт.",
+
             }, this, "ru");
         }
 
