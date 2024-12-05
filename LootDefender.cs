@@ -16,7 +16,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.2.3")]
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.2.4")]
     [Description("Defends loot from other players who dealt less damage than you.")]
     internal class LootDefender : RustPlugin
     {
@@ -306,7 +306,7 @@ namespace Oxide.Plugins
                 }
 
                 float damage = 0f;
-                var grid = PhoneController.PositionToGridCoord(entity.transform.position);
+                var grid = PositionToGrid(entity.transform.position);
 
                 if (entry.TeamID != "0")
                 {
@@ -573,7 +573,7 @@ namespace Oxide.Plugins
                         sb.Append($"{damageGroup.ToReport(damageGroup.FirstDamagerDealer, this)}\n");
                     }
 
-                    if (damageEntryType == DamageEntryType.NPC && !string.IsNullOrEmpty(firstDamageDealer))
+                    if (damageEntryType == DamageEntryType.NPC && !string.IsNullOrEmpty(firstDamageDealer) && damageGroups.Count > 1)
                     {
                         sb.Append($" {_("FirstLock", userid, firstDamageDealer, config.Npc.Threshold * 100f)}");
                     }
@@ -755,6 +755,7 @@ namespace Oxide.Plugins
 
         private void Init()
         {
+            Unsubscribe(nameof(OnEventTrigger));
             Unsubscribe();
             Instance = this;
             sb = new();
@@ -767,7 +768,7 @@ namespace Oxide.Plugins
             LoadData();
         }
 
-        private void OnServerInitialized()
+        private void OnServerInitialized(bool serverinit)
         {
             if (config.Hackable.Enabled)
             {
@@ -843,12 +844,28 @@ namespace Oxide.Plugins
                 config.SupplyDrop.Skins.Add(0uL);
             }
 
+            if (config.Lockout.F15)
+            {
+                Subscribe(nameof(OnEventTrigger));
+            }
+            
             Subscribe(nameof(OnEntityTakeDamage));
             Subscribe(nameof(OnEntityDeath));
             Subscribe(nameof(OnEntityKill));
             Subscribe(nameof(CanLootEntity));
             Subscribe(nameof(CanBradleyTakeDamage));
             SetupLaunchSite();
+        }
+
+        private bool IsF15EventActive;
+
+        private void OnEventTrigger(TriggeredEventPrefab prefab)
+        {
+            if (config.Lockout.F15 && !IsF15EventActive && prefab.name == "assets/bundled/prefabs/world/event_f15e.prefab")
+            {
+                Puts("F15 event has started; bypassing player lockouts!");
+                IsF15EventActive = true;
+            }
         }
 
         private void Unload()
@@ -872,7 +889,7 @@ namespace Oxide.Plugins
 
         private object OnPlayerAttack(BasePlayer attacker, HitInfo hitInfo)
         {
-            if (!attacker || HasPermission(attacker, bypassDamagePerm) || hitInfo == null)
+            if (attacker == null || HasPermission(attacker, bypassDamagePerm) || hitInfo == null)
             {
                 return null;
             }
@@ -1011,7 +1028,7 @@ namespace Oxide.Plugins
             return null;
         }
 
-        public static bool IsKilled(BaseNetworkable a) => (object)a == null || a.IsDestroyed || !a.isSpawned;
+        public static bool IsKilled(BaseNetworkable a) => a == null || a.IsDestroyed || !a.isSpawned;
 
         private bool BlockDamage(DamageEntryType damageEntryType)
         {
@@ -1317,7 +1334,7 @@ namespace Oxide.Plugins
 
             BasePlayer attacker = BasePlayer.FindByID(userid);
 
-            if (!attacker || !attacker.userID.IsSteamId())
+            if (attacker == null || !attacker.userID.IsSteamId())
             {
                 return;
             }
@@ -1531,7 +1548,7 @@ namespace Oxide.Plugins
 
         private void OnEntitySpawned(CH47Helicopter heli)
         {
-            if (!config.CH47Gibs || !heli) return;
+            if (!config.CH47Gibs || heli == null) return;
             heli.serverGibs.guid = string.Empty;
         }
 
@@ -1576,7 +1593,7 @@ namespace Oxide.Plugins
                 {
                     if (config.SupplyDrop.ThrownAt)
                     {
-                        CreateMessage(target, "ThrownSupplySignalAt", player.displayName, PhoneController.PositionToGridCoord(player.transform.position));
+                        CreateMessage(target, "ThrownSupplySignalAt", player.displayName, PositionToGrid(player.transform.position));
                     }
                     else CreateMessage(target, "ThrownSupplySignal", player.displayName);
                 }
@@ -1584,7 +1601,7 @@ namespace Oxide.Plugins
 
             if (config.SupplyDrop.NotifyConsole)
             {
-                Puts(_("ThrownSupplySignalAt", null, player.displayName, PhoneController.PositionToGridCoord(player.transform.position)));
+                Puts(_("ThrownSupplySignalAt", null, player.displayName, PositionToGrid(player.transform.position)));
             }
 
             Interface.CallHook("OnModifiedSupplySignal", player, ss, tw);
@@ -1932,7 +1949,7 @@ namespace Oxide.Plugins
                 return false;
             }
 
-            if (!player.IsValid() || HasPermission(player, bypassLockoutsPerm))
+            if (!player.IsValid() || IsF15EventActive || HasPermission(player, bypassLockoutsPerm))
             {
                 return false;
             }
@@ -2008,7 +2025,7 @@ namespace Oxide.Plugins
 
         public void TrySetLockout(string userid, BasePlayer player, DamageEntryType damageEntryType, ulong skinID)
         {
-            if (config.Lockout.Exceptions.Contains(skinID))
+            if (IsF15EventActive || config.Lockout.Exceptions.Contains(skinID))
             {
                 return;
             }
@@ -2274,7 +2291,7 @@ namespace Oxide.Plugins
         {
             List<T> entities = Pool.Get<List<T>>();
             Vis.Entities(a, n, entities, m, QueryTriggerInteraction.Collide);
-            entities.RemoveAll(x => !x || x.IsDestroyed);
+            entities.RemoveAll(x => x == null || x.IsDestroyed);
             return entities;
         }
 
@@ -2539,7 +2556,7 @@ namespace Oxide.Plugins
 
             public static void ShowLockouts(BasePlayer player)
             {
-                if (Instance.HasPermission(player, bypassLockoutsPerm))
+                if (Instance.IsF15EventActive || Instance.HasPermission(player, bypassLockoutsPerm))
                 {
                     data.Lockouts.Remove(player.UserIDString);
                     return;
@@ -2839,7 +2856,7 @@ namespace Oxide.Plugins
             return true;
         }
 
-        private static string PositionToGrid(Vector3 position) => PhoneController.PositionToGridCoord(position);
+        private static string PositionToGrid(Vector3 position) => MapHelper.PositionToString(position);
 
         private void SendDiscordMessage(HashSet<ulong> members, List<string> usernames, Vector3 position, DamageEntryType damageEntryType)
         {
@@ -3294,6 +3311,9 @@ namespace Oxide.Plugins
 
         public class PluginSettingsBaseLockout
         {
+            [JsonProperty(PropertyName = "Bypass During F15 Server Wipe Event")]
+            public bool F15 { get; set; }
+
             [JsonProperty(PropertyName = "Command To See Lockout Times")]
             public string Command { get; set; } = "lockouts";
 
@@ -3445,6 +3465,7 @@ namespace Oxide.Plugins
         protected override void LoadConfig()
         {
             base.LoadConfig();
+            canSaveConfig = false;
             try
             {
                 config = Config.ReadObject<Configuration>();
@@ -3454,11 +3475,11 @@ namespace Oxide.Plugins
                 if (config.Npc.Threshold > 1f) config.Npc.Threshold /= 100f;
                 if (!config.Helicopter.LockHarbor.HasValue) config.Helicopter.LockHarbor = config.Bradley.LockHarbor;
                 if (!config.Npc.Messages.NotifyLocked.HasValue) config.Npc.Messages.NotifyLocked = false;
+                canSaveConfig = true;
                 SaveConfig();
             }
             catch (Exception ex)
             {
-                canSaveConfig = false;
                 Puts(ex.ToString());
                 LoadDefaultConfig();
             }
@@ -3505,7 +3526,7 @@ namespace Oxide.Plugins
                 ["NoLockouts"] = "You have no lockouts.",
                 ["Time"] = "{0}m",
                 ["Heli Time"] = "{0}m",
-                ["HeliKilled"] = "A bradley was killed.",
+                ["HeliKilled"] = "A heli was killed.",
                 ["BradleyKilled"] = "A bradley was killed.",
                 ["BradleyUnlocked"] = "The bradley at {0} has been unlocked.",
                 ["HeliUnlocked"] = "The heli at {0} has been unlocked.",
