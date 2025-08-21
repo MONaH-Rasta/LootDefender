@@ -1,4 +1,4 @@
-﻿using Facepunch;
+using Facepunch;
 using Facepunch.Math;
 using Newtonsoft.Json;
 using Oxide.Core;
@@ -16,7 +16,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.2.4")]
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.2.5")]
     [Description("Defends loot from other players who dealt less damage than you.")]
     internal class LootDefender : RustPlugin
     {
@@ -271,6 +271,8 @@ namespace Oxide.Plugins
             {
                 Instance._locked[_uid] = entity.OwnerID = OwnerID = id;
                 _position = entity.transform.position;
+                
+                Interface.CallHook("OnLockedEntity", entity, id);
             }
 
             public void AddDamage(BaseCombatEntity entity, BasePlayer attacker, DamageEntry entry, float amount)
