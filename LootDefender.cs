@@ -1,4 +1,4 @@
-using Facepunch;
+﻿using Facepunch;
 using Facepunch.Math;
 using Newtonsoft.Json;
 using Oxide.Core;
@@ -16,7 +16,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.2.5")]
+    [Info("Loot Defender", "Author Egor Blagov, Maintainer nivex", "2.2.7")]
     [Description("Defends loot from other players who dealt less damage than you.")]
     internal class LootDefender : RustPlugin
     {
@@ -65,7 +65,7 @@ namespace Oxide.Plugins
             [JsonProperty(PropertyName = "DamageInfo")]
             public Dictionary<ulong, DamageInfo> Damage { get; set; } = new();
             [JsonProperty(PropertyName = "LockInfo")]
-            public Dictionary<ulong, LockInfo> Lock { get; set; } = new();
+            public Dictionary<ulong, LockInfo> LootLock { get; set; } = new();
 
             public void Sanitize()
             {
@@ -97,7 +97,7 @@ namespace Oxide.Plugins
                     }
                 }
 
-                foreach (var (uid, lockInfo) in Lock.ToList())
+                foreach (var (uid, lockInfo) in LootLock.ToList())
                 {
                     var entity = BaseNetworkable.serverEntities.Find(new(uid)) as BaseEntity;
 
@@ -108,11 +108,11 @@ namespace Oxide.Plugins
                             entity.OwnerID = 0uL;
                         }
 
-                        Lock.Remove(uid);
+                        LootLock.Remove(uid);
                     }
                     else if (entity == null)
                     {
-                        Lock.Remove(uid);
+                        LootLock.Remove(uid);
                     }
                 }
             }
@@ -157,7 +157,7 @@ namespace Oxide.Plugins
             public List<DamageKey> damageKeys { get; set; } = new();
             [JsonIgnore]
             public Dictionary<ulong, BasePlayer> interact { get; set; } = new();
-            private List<ulong> participants { get; set; } = new();
+            internal List<ulong> participants { get; set; } = new();
             public DamageEntryType damageEntryType { get; set; } = DamageEntryType.None;
             public string NPCName { get; set; }
             public ulong OwnerID { get; set; }
@@ -169,11 +169,12 @@ namespace Oxide.Plugins
             internal Vector3 _position { get; set; }
             internal Vector3 lastAttackedPosition { get; set; }
             internal ulong _uid { get; set; }
+            internal float maxHealth;
             [JsonIgnore]
             internal Timer _timer { get; set; }
             internal List<DamageKey> keys { get; set; } = new();
 
-            List<DamageGroup> damageGroups;
+            internal List<DamageGroup> damageGroups;
 
             internal float FullDamage
             {
@@ -190,7 +191,7 @@ namespace Oxide.Plugins
                 SkinID = entity.skinID;
                 _entity = entity;
                 _uid = entity.net.ID.Value;
-
+                maxHealth = entity.MaxHealth();
                 this.damageEntryType = damageEntryType;
                 this.NPCName = NPCName;
                 this.start = start;
@@ -271,7 +272,7 @@ namespace Oxide.Plugins
             {
                 Instance._locked[_uid] = entity.OwnerID = OwnerID = id;
                 _position = entity.transform.position;
-                
+
                 Interface.CallHook("OnLockedEntity", entity, id);
             }
 
@@ -324,7 +325,7 @@ namespace Oxide.Plugins
 
                 if (config.Helicopter.Threshold > 0f && entity is PatrolHelicopter)
                 {
-                    if (damage >= entity.MaxHealth() * config.Helicopter.Threshold && !Instance.HasPermission(attacker, "lootdefender.bypasshelilock"))
+                    if (damage >= maxHealth * config.Helicopter.Threshold && !Instance.HasPermission(attacker, "lootdefender.bypasshelilock"))
                     {
                         if (config.Helicopter.Messages.NotifyLocked == true)
                         {
@@ -339,7 +340,7 @@ namespace Oxide.Plugins
                 }
                 else if (config.Bradley.Threshold > 0f && entity is BradleyAPC && Instance.CanLockBradley(entity))
                 {
-                    if (damage >= entity.MaxHealth() * config.Bradley.Threshold && !Instance.HasPermission(attacker, "lootdefender.bypassbradleylock"))
+                    if (damage >= maxHealth * config.Bradley.Threshold && !Instance.HasPermission(attacker, "lootdefender.bypassbradleylock"))
                     {
                         if (config.Bradley.Messages.NotifyLocked == true)
                         {
@@ -354,7 +355,7 @@ namespace Oxide.Plugins
                 }
                 else if (config.Npc.Threshold > 0f && entity is BasePlayer npc && Instance.CanLockNpc(npc))
                 {
-                    if (!npc.userID.IsSteamId() && damage >= entity.MaxHealth() * config.Npc.Threshold && !Instance.HasPermission(attacker, "lootdefender.bypassnpclock"))
+                    if (!npc.userID.IsSteamId() && damage >= maxHealth * config.Npc.Threshold && !Instance.HasPermission(attacker, "lootdefender.bypassnpclock"))
                     {
                         if (config.Npc.Messages.NotifyLocked == true)
                         {
@@ -857,6 +858,13 @@ namespace Oxide.Plugins
             Subscribe(nameof(CanLootEntity));
             Subscribe(nameof(CanBradleyTakeDamage));
             SetupLaunchSite();
+
+            if (serverinit)
+            {
+                data.Damage.Clear();
+                data.LootLock.Clear();
+                SaveData();
+            }
         }
 
         private bool IsF15EventActive;
@@ -904,7 +912,7 @@ namespace Oxide.Plugins
 
             if (config.Bradley.Threshold != 0f || config.Helicopter.Threshold != 0f)
             {
-                if (hitInfo.HitEntity is ServerGib gibs && gibs.IsValid() && data.Lock.TryGetValue(gibs.net.ID.Value, out var lockInfo))
+                if (hitInfo.HitEntity is ServerGib gibs && gibs.IsValid() && data.LootLock.TryGetValue(gibs.net.ID.Value, out var lockInfo))
                 {
                     if (gibs.OwnerID != 0 && !lockInfo.IsLockOutdated)
                     {
@@ -922,7 +930,7 @@ namespace Oxide.Plugins
                     }
                     else
                     {
-                        data.Lock.Remove(gibs.net.ID.Value);
+                        data.LootLock.Remove(gibs.net.ID.Value);
                         gibs.OwnerID = 0;
                     }
                 }
@@ -978,7 +986,14 @@ namespace Oxide.Plugins
                 return null;
             }
 
-            if (!(hitInfo.Initiator is BasePlayer attacker) || !attacker.userID.IsSteamId())
+            BasePlayer attacker = hitInfo.Initiator as BasePlayer;
+
+            if (attacker == null && hitInfo.Initiator is SamSite && hitInfo.Initiator.OwnerID.IsSteamId())
+            {
+                attacker = BasePlayer.FindByID(hitInfo.Initiator.OwnerID);
+            }
+
+            if (attacker == null || !attacker.userID.IsSteamId())
             {
                 return null;
             }
@@ -1292,7 +1307,7 @@ namespace Oxide.Plugins
                 }
             }
 
-            if (data.Lock.Remove(entity.net.ID.Value, out var lockInfo2) && damageEntryType == DamageEntryType.Corpse && config.Npc.Enabled && entity is LootableCorpse corpse2)
+            if (data.LootLock.Remove(entity.net.ID.Value, out var lockInfo2) && damageEntryType == DamageEntryType.Corpse && config.Npc.Enabled && entity is LootableCorpse corpse2)
             {
                 var corpsePos = corpse2.transform.position;
                 var corpseId = corpse2.playerSteamID;
@@ -1440,6 +1455,18 @@ namespace Oxide.Plugins
             }
         }
 
+        //private void OnMonumentUnlock(string name, Vector3 position, ulong occupiedBy, ulong networkID)
+        //{
+        //    BaseEntity entity = BaseNetworkable.serverEntities.Find(new(networkID)) as BaseEntity;
+        //    if (entity != null && entity.OwnerID.IsSteamId())
+        //    {
+        //        entity.OwnerID = 0;
+        //    }
+        //    data.Damage.Remove(networkID);
+        //    data.LootLock.Remove(networkID);
+        //    _locked.Remove(networkID);
+        //}
+
         private object OnAutoPickupEntity(BasePlayer player, BaseEntity entity) => CanLootEntityHandler(player, entity);
 
         private object CanLootEntity(BasePlayer player, DroppedItemContainer container) => CanLootEntityHandler(player, container);
@@ -1490,14 +1517,14 @@ namespace Oxide.Plugins
                 return null;
             }
 
-            if (!data.Lock.TryGetValue(entity.net.ID.Value, out var lockInfo))
+            if (!data.LootLock.TryGetValue(entity.net.ID.Value, out var lockInfo))
             {
                 return null;
             }
 
             if (entity.OwnerID == 0 || lockInfo.IsLockOutdated)
             {
-                data.Lock.Remove(entity.net.ID.Value);
+                data.LootLock.Remove(entity.net.ID.Value);
                 entity.OwnerID = 0;
                 return null;
             }
@@ -1573,7 +1600,7 @@ namespace Oxide.Plugins
             ss.OwnerID = player.userID;
             ss.skinID = supplyDropSkinID;
 
-            if (config.SupplyDrop.Bypass)
+            if (config.SupplyDrop.Bypass && !player.IsNearEnemyBase(ss.WorldSpaceBounds()))
             {
                 var userid = player.userID;
                 var position = ss.transform.position;
@@ -1622,7 +1649,7 @@ namespace Oxide.Plugins
                 {
                     ss.Invoke(ss.FinishUp, smokeDuration);
                     ss.SetFlag(BaseEntity.Flags.On, true, false, true);
-                    ss.SendNetworkUpdateImmediate(false);
+                    ss.SendNetworkUpdateImmediate();
                 }
                 else ss.FinishUp();
             }
@@ -2179,13 +2206,15 @@ namespace Oxide.Plugins
             return null;
         }
 
-        private bool IsDefended(PatrolHelicopter heli) => heli.IsValid() && (data.Lock.ContainsKey(heli.net.ID.Value) || data.Damage.ContainsKey(heli.net.ID.Value));
+        private bool IsDefended(PatrolHelicopter heli) => heli.IsValid() && (data.LootLock.ContainsKey(heli.net.ID.Value) || data.Damage.ContainsKey(heli.net.ID.Value));
 
-        private bool IsDefended(BaseCombatEntity victim) => victim.IsValid() && (_locked.ContainsKey(victim.net.ID.Value) || data.Lock.ContainsKey(victim.net.ID.Value));
+        private bool IsDefended(BaseCombatEntity victim) => victim.IsValid() && (_locked.ContainsKey(victim.net.ID.Value) || data.LootLock.ContainsKey(victim.net.ID.Value));
 
+        private List<KeyValuePair<string, Lockout>> _lockouts = new();
         private void DoLockoutRemoves()
         {
-            foreach (var (userid, lo) in data.Lockouts.ToList())
+            _lockouts.AddRange(data.Lockouts);
+            foreach (var (userid, lo) in _lockouts)
             {
                 if (lo.Bradley - Epoch.Current <= 0)
                 {
@@ -2202,12 +2231,11 @@ namespace Oxide.Plugins
                     data.Lockouts.Remove(userid);
                 }
             }
+            _lockouts.Clear();
         }
 
         private void Unsubscribe()
         {
-            Unsubscribe(nameof(OnBossSpawn));
-            Unsubscribe(nameof(OnBossKilled));
             Unsubscribe(nameof(OnGuardedCrateEventEnded));
             Unsubscribe(nameof(CanHackCrate));
             Unsubscribe(nameof(OnPlayerSleepEnded));
@@ -2356,14 +2384,14 @@ namespace Oxide.Plugins
             var entities = FindEntitiesOfType<T>(position, damageEntryType == DamageEntryType.Heli ? 50f : 20f);
             foreach (var entity in entities)
             {
-                if (data.Lock.ContainsKey(entity.net.ID.Value))
+                if (data.LootLock.ContainsKey(entity.net.ID.Value))
                 {
                     continue;
                 }
 
                 ulong ownerid = lockInfo.damageInfo.OwnerID;
                 entity.OwnerID = ownerid;
-                data.Lock[entity.net.ID.Value] = lockInfo;
+                data.LootLock[entity.net.ID.Value] = lockInfo;
 
                 float time = GetLockTime(damageEntryType);
 
@@ -2382,20 +2410,20 @@ namespace Oxide.Plugins
             var corpses = FindEntitiesOfType<LootableCorpse>(position, 3f);
             foreach (var corpse in corpses)
             {
-                if (corpse.IsValid() && corpse.playerSteamID == playerSteamID && !data.Lock.ContainsKey(corpse.net.ID.Value))
+                if (corpse.IsValid() && corpse.playerSteamID == playerSteamID && !data.LootLock.ContainsKey(corpse.net.ID.Value))
                 {
                     if (config.Npc.LockTime > 0f)
                     {
                         var uid = corpse.net.ID.Value;
 
-                        timer.Once(config.Npc.LockTime, () => data.Lock.Remove(uid));
+                        timer.Once(config.Npc.LockTime, () => data.LootLock.Remove(uid));
                         corpse.Invoke(() => corpse.OwnerID = 0, config.Npc.LockTime);
                     }
 
                     ulong ownerid = damageInfo.OwnerID;
                     corpse.OwnerID = ownerid;
                     corpse.Invoke(() => corpse.OwnerID = ownerid, 1f);
-                    data.Lock[corpse.net.ID.Value] = new(damageInfo, config.Npc.LockTime);
+                    data.LootLock[corpse.net.ID.Value] = new(damageInfo, config.Npc.LockTime);
                     timer.Once(3f, () => data.Damage.Remove(damageKey));
                 }
             }
@@ -2407,20 +2435,20 @@ namespace Oxide.Plugins
             var containers = FindEntitiesOfType<DroppedItemContainer>(position, 3f);
             foreach (var container in containers)
             {
-                if (container.IsValid() && container.playerSteamID == playerSteamID && !data.Lock.ContainsKey(container.net.ID.Value))
+                if (container.IsValid() && container.playerSteamID == playerSteamID && !data.LootLock.ContainsKey(container.net.ID.Value))
                 {
                     if (config.Npc.LockTime > 0f)
                     {
                         var uid = container.net.ID.Value;
 
-                        timer.Once(config.Npc.LockTime, () => data.Lock.Remove(uid));
+                        timer.Once(config.Npc.LockTime, () => data.LootLock.Remove(uid));
                         container.Invoke(() => container.OwnerID = 0, config.Npc.LockTime);
                     }
 
                     ulong ownerid = lockInfo.damageInfo.OwnerID;
                     container.OwnerID = ownerid;
                     container.Invoke(() => container.OwnerID = ownerid, 1f);
-                    data.Lock[container.net.ID.Value] = lockInfo;
+                    data.LootLock[container.net.ID.Value] = lockInfo;
                 }
             }
             Pool.FreeUnmanaged(ref containers);
@@ -2796,7 +2824,7 @@ namespace Oxide.Plugins
                     }
                     else if (command == "unlock")
                     {
-                        foreach (var pair in data.Lock.ToList())
+                        foreach (var pair in data.LootLock.ToList())
                         {
                             if (player.Distance(pair.Value.damageInfo._position) < 25f || pair.Value.CanInteract(player.userID, player))
                             {
@@ -2805,7 +2833,7 @@ namespace Oxide.Plugins
                                     pair.Value.damageInfo._entity.OwnerID = 0uL;
                                     Message(player, $"Unlocked {(pair.Value.damageInfo.damageEntryType == DamageEntryType.Bradley ? "bradley" : pair.Value.damageInfo.damageEntryType == DamageEntryType.NPC ? "npc" : pair.Value.damageInfo.damageEntryType == DamageEntryType.Heli ? "heli" : "corpse")}");
                                 }
-                                data.Lock.Remove(pair.Key);
+                                data.LootLock.Remove(pair.Key);
                             }
                         }
                     }
